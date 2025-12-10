@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, dev, feature/** ]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Lint
+        run: |
+          pip install ruff
+          ruff check src
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Build Docker
+        run: docker build -t fraud-agent:ci .
