@@ -1,0 +1,9 @@
+.env
+*.env
+*fraudTrain.csv
+
+.venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
