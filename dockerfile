@@ -11,4 +11,4 @@ COPY . .
 ENV PORT=10000
 EXPOSE 10000
 
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "10000"]
+CMD ["streamlit", "run", "ui/app.py", "--server.port=10000", "--server.address=0.0.0.0"]
