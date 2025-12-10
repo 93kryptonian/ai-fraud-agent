@@ -1,29 +1,5 @@
 
 
-
-# # src/llm/scoring.py
-
-# import math
-
-# def score_answer(question: str, answer: str, chunks, use_llm=False):
-#     """
-#     Simple but effective semantic relevance scoring.
-#     """
-#     if not answer or "not provide enough information" in answer.lower():
-#         return {"final_score": 0.0}
-
-#     # naive heuristic: longer context → stronger answer
-#     ctx_len = sum(len(c["content"]) for c in chunks)
-#     len_score = min(ctx_len / 5000, 1.0)
-
-#     # keyword overlap
-#     q_terms = set(question.lower().split())
-#     a_terms = set(answer.lower().split())
-#     overlap = len(q_terms & a_terms) / (len(q_terms) + 1)
-
-#     final_score = (0.6 * len_score) + (0.4 * overlap)
-#     return {"final_score": round(final_score, 3)}
-
 import re
 import random
 from typing import Dict, List
@@ -125,7 +101,7 @@ def embedding_similarity(question: str, answer: str, chunks: List[Dict]) -> floa
             chunk_sims.append(cosine_sim(a_emb, emb))
 
         return round(mean([qa_sim] + chunk_sims), 3)
-    except:
+    except Exception:
         return 0.0
 
 

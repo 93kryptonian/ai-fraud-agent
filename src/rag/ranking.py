@@ -19,7 +19,7 @@ This is used by rag_chain.py.
 
 import numpy as np
 from typing import List, Dict, Any, Optional
-from collections import Counter
+# from collections import Counter
 
 from rank_bm25 import BM25Okapi  
 
@@ -156,7 +156,7 @@ def _rerank_by_llm(query: str, chunks: List[Dict[str, Any]], top_n: int) -> List
 
         try:
             s = float(resp.strip())
-        except:
+        except Exception:
             s = 0.0
 
         scores.append(s)

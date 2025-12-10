@@ -130,9 +130,9 @@ class SupabaseDB:
     def insert(table: str, rows: List[Dict[str, Any]]):
         return batch_insert(table, rows)
 
-    @staticmethod
-    def vector(embedding: List[float], top_k: int = 5, source: Optional[str] = None):
-        return vector_search(embedding, top_k, source)
+    # @staticmethod
+    # def vector(embedding: List[float], top_k: int = 5, source: Optional[str] = None):
+    #     return vector_search(embedding, top_k, source)
 
     @staticmethod
     def ping():
