@@ -346,7 +346,7 @@ def summarize_ranking(df: pd.DataFrame, lang: str) -> Tuple[str, float]:
     top_total = int(top.get("total_count", top["fraud_count"]))
     top_rate = float(top.get("fraud_rate", top["fraud_count"] / max(1, top_total)))
 
-    top5 = df_sorted.head(5)
+    # top5 = df_sorted.head(5)
     total_fraud = int(df_sorted["fraud_count"].sum())
 
     if lang.startswith("id"):

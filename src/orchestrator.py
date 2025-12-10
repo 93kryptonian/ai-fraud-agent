@@ -233,7 +233,7 @@ def run_query(raw_query: str, detected_lang: str = None) -> Dict[str, Any]:
 
         # English question for retrieval
         final_query_en = meta["final_query_en"]
-        user_lang = meta["lang"] or initial_lang
+        user_lang = meta["lang"] or user_lang
 
         # ---------------------------------------------------------
         # Run the RAG pipeline
