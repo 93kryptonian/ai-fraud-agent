@@ -2,12 +2,18 @@
 Updated test runner compatible with the orchestrator-based architecture.
 """
 
-import traceback
-from pprint import pprint
+import os
 import pytest
 
+if os.getenv("CI") == "true":
+    pytest.skip("Skipping LLM tests in CI", allow_module_level=True)
 
-from src.orchestrator import run_query  # <-- FIXED: use orchestrator only
+
+import traceback
+from pprint import pprint
+
+
+from src.orchestrator import run_query  
 
 TESTS = [
     {
