@@ -4,8 +4,13 @@ from typing import Any, Dict, List, Optional
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-import psycopg2
-import psycopg2.extras
+# import psycopg2
+# import psycopg2.extras
+try:
+    import psycopg2
+    import psycopg2.extras
+except ImportError:
+    psycopg2 = None
 
 
 # =====================================================

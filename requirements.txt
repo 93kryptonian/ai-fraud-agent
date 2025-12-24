@@ -29,6 +29,7 @@ sentencepiece==0.2.1
 # -------------------------------
 supabase==2.4.3
 postgrest==0.16.11
+psycopg2-binary
 
 # -------------------------------
 # Monitoring (optional)

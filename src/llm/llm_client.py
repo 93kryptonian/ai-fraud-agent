@@ -30,11 +30,22 @@ MAX_COST_USD = float(os.getenv("MAX_COST_USD", "0.10"))  # 10 cents/session
 
 # Internal token accounting
 SESSION_COST = 0.0
+_openai_client = None
+
+def get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        if not OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY not set")
+        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
+    return _openai_client
 
 # ======================================================
 # OpenAI CLIENT
 # ======================================================
-client = OpenAI(api_key=OPENAI_API_KEY)
+# client = OpenAI(api_key=OPENAI_API_KEY)
+client = get_openai_client()
+
 
 
 # ======================================================

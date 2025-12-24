@@ -19,11 +19,23 @@ EMBED_MODEL = "text-embedding-3-small"
 MAX_RETRIES = 5
 MAX_CHARS = 7000
 
+# client = get_openai_client()
+_openai_client = None
+
+def get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        if not OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY not set")
+        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
+    return _openai_client
 
 # ------------------------------------------------------------
 # CLIENT
 # ------------------------------------------------------------
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+# openai_client = OpenAI(api_key=OPENAI_API_KEY)
+openai_client = get_openai_client()
+
 
 
 # ------------------------------------------------------------
