@@ -1,46 +1,79 @@
 # src/monitoring/phoenix_client.py
 
 import os
-from typing import Dict
+from typing import Dict, Optional
 from dotenv import load_dotenv
-from phoenix.evals import LLMEvaluator, OpenAIModel
 from src.utils.logger import get_logger
 
-
-logger = get_logger(__name__)
 load_dotenv()
+logger = get_logger(__name__)
 
 # -------------------------------------------------
-# Phoenix LLM Judge Setup
+# Config
 # -------------------------------------------------
 
+PHOENIX_ENABLED = os.getenv("PHOENIX_ENABLED", "false").lower() == "true"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Model used to perform evaluation 
-model = OpenAIModel(
-    model="gpt-4o-mini",
-    api_key=OPENAI_API_KEY,
-)
+# Lazy singletons
+_evaluator = None
 
-# Standard RAG evaluation criteria
-evaluator = LLMEvaluator(
-       name="rag_eval",
-    llm=model,
-    prompt_template="RAG_RELEVANCY_PROMPT_TEMPLATE",
-)
 
 # -------------------------------------------------
-# Evaluation Function
+# Lazy initializer
 # -------------------------------------------------
 
-def run_phoenix_llm_judge(question: str, answer: str, context: str) -> Dict:
+def _get_evaluator():
+    global _evaluator
+
+    if not PHOENIX_ENABLED:
+        return None
+
+    if _evaluator is not None:
+        return _evaluator
+
+    try:
+        from phoenix.evals import LLMEvaluator, OpenAIModel
+    except ImportError as e:
+        raise RuntimeError(
+            "PHOENIX_ENABLED=true but phoenix is not installed. "
+            "Install arize-phoenix to enable monitoring."
+        ) from e
+
+    model = OpenAIModel(
+        model="gpt-4o-mini",
+        api_key=OPENAI_API_KEY,
+    )
+
+    _evaluator = LLMEvaluator(
+        name="rag_eval",
+        llm=model,
+        prompt_template="RAG_RELEVANCY_PROMPT_TEMPLATE",
+    )
+
+    logger.info("[phoenix] evaluator initialized")
+    return _evaluator
+
+
+# -------------------------------------------------
+# Public API
+# -------------------------------------------------
+
+def run_phoenix_llm_judge(
+    question: str,
+    answer: str,
+    context: str,
+) -> Optional[Dict]:
     """
     Evaluate RAG model answers using Phoenix evaluator.
-    This version does NOT require Phoenix dashboard or tracing.
 
     Returns:
-        Dict with metric scores (all floats 0-1).
+        Dict with metric scores, or None if Phoenix is disabled.
     """
+    evaluator = _get_evaluator()
+
+    if evaluator is None:
+        return None  # no-op in CI / local
 
     try:
         result = evaluator.evaluate(
@@ -51,7 +84,6 @@ def run_phoenix_llm_judge(question: str, answer: str, context: str) -> Dict:
 
         metrics = result.to_dict()
         logger.info(f"[phoenix] eval metrics = {metrics}")
-
         return metrics
 
     except Exception as e:
