@@ -4,6 +4,8 @@ Updated test runner compatible with the orchestrator-based architecture.
 
 import traceback
 from pprint import pprint
+import pytest
+
 
 from src.orchestrator import run_query  # <-- FIXED: use orchestrator only
 
@@ -162,6 +164,9 @@ def main():
     return True
 
 
+# def test_run_all_queries():
+#     assert main() is True
+@pytest.mark.llm
 def test_run_all_queries():
     assert main() is True
 

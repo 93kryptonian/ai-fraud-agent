@@ -24,8 +24,9 @@ jobs:
           pip install ruff
           ruff check src
 
-      - name: Run tests
-        run: pytest -q
-
+      # - name: Run tests
+      #   run: pytest -q
+      - name: Run tests (skip LLM)
+        run: pytest -q -m "not llm"
       - name: Build Docker
         run: docker build -t fraud-agent:ci .
