@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, ValidationError
 
 from src.utils.logger import get_logger
-from src.llm.response_schema import RAGResponse  # type hints only
+# from src.llm.response_schema import RAGResponse  # type hints only
 
 load_dotenv()
 logger = get_logger(__name__)
