@@ -26,6 +26,10 @@ from rank_bm25 import BM25Okapi
 from src.embeddings.embedder import embedding_model
 from src.llm.llm_client import llm
 from src.utils.logger import get_logger
+import os
+
+EMBEDDINGS_AVAILABLE = bool(os.getenv("OPENAI_API_KEY"))
+
 
 logger = get_logger(__name__)
 
@@ -68,7 +72,25 @@ def _deduplicate_chunks(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # Stage 1 — Embedding similarity
 # ======================================================
 
+# def _embedding_scores(query: str, chunks: List[Dict[str, Any]]) -> List[float]:
+#     query_vec = embedding_model.embed_one(query)
+#     scores = []
+
+#     for c in chunks:
+#         vec = embedding_model.embed_one(c["content"])
+#         sim = cosine_similarity(query_vec, vec)
+#         scores.append(sim)
+
+#     return scores
 def _embedding_scores(query: str, chunks: List[Dict[str, Any]]) -> List[float]:
+    """
+    Returns embedding similarity scores.
+    Falls back to zeros when embeddings are unavailable (CI / offline).
+    """
+    if not EMBEDDINGS_AVAILABLE:
+        logger.info("[ranking] Embeddings disabled — using zeros")
+        return [0.0] * len(chunks)
+
     query_vec = embedding_model.embed_one(query)
     scores = []
 
@@ -172,17 +194,52 @@ def _rerank_by_llm(query: str, chunks: List[Dict[str, Any]], top_n: int) -> List
 # Hybrid Fusion
 # ======================================================
 
-def _fuse_scores(emb: List[float], bm25: List[float], coh: List[float], boost: List[float],
-                 llm_scores: Optional[List[float]]) -> List[float]:
+# def _fuse_scores(emb: List[float], bm25: List[float], coh: List[float], boost: List[float],
+#                  llm_scores: Optional[List[float]]) -> List[float]:
+#     fused = []
+
+#     for i in range(len(emb)):
+#         score = (
+#             0.45 * emb[i] +
+#             0.35 * bm25[i] +
+#             0.10 * coh[i] +
+#             0.10 * boost[i]
+#         )
+
+#         if llm_scores:
+#             score = 0.7 * score + 0.3 * llm_scores[i]
+
+#         fused.append(score)
+
+#     return fused
+
+def _fuse_scores(
+    emb: List[float],
+    bm25: List[float],
+    coh: List[float],
+    boost: List[float],
+    llm_scores: Optional[List[float]],
+) -> List[float]:
+
     fused = []
 
-    for i in range(len(emb)):
-        score = (
-            0.45 * emb[i] +
-            0.35 * bm25[i] +
-            0.10 * coh[i] +
-            0.10 * boost[i]
-        )
+    use_emb = any(e > 0 for e in emb)
+
+    for i in range(len(bm25)):
+        if use_emb:
+            score = (
+                0.45 * emb[i] +
+                0.35 * bm25[i] +
+                0.10 * coh[i] +
+                0.10 * boost[i]
+            )
+        else:
+            # Re-weight when embeddings are disabled
+            score = (
+                0.55 * bm25[i] +
+                0.25 * coh[i] +
+                0.20 * boost[i]
+            )
 
         if llm_scores:
             score = 0.7 * score + 0.3 * llm_scores[i]
@@ -190,7 +247,6 @@ def _fuse_scores(emb: List[float], bm25: List[float], coh: List[float], boost: L
         fused.append(score)
 
     return fused
-
 
 # ======================================================
 # MAIN API — used by rag_chain.py
