@@ -1,11 +1,18 @@
-
 """
-Question Rewrite Module 
--------------------------------------
-- Prevents aggressive rewrite for domain-specific finance/regulatory/fraud questions.
-- Only rewrites ambiguous questions.
-- Handles multilingual translation (ID <-> EN).
-- Returns metadata explaining whether rewrite happened.
+Question Rewrite Module
+-----------------------
+Responsibilities:
+- Detect user language (EN / ID)
+- Translate queries to English for retrieval
+- Prevent rewriting of domain-specific (fraud / regulatory) questions
+- Rewrite only vague questions
+- Return metadata explaining every transformation
+
+Design principles:
+- Conservative by default
+- Never add facts
+- Never change intent
+- Rewrite only when it improves retrieval
 """
 
 import re
@@ -13,126 +20,146 @@ from typing import Tuple, Dict
 
 from src.llm.llm_client import llm
 
-
-# =====================================================================
-# LANGUAGE DETECTION (cheap heuristic + LLM fallback)
-# =====================================================================
+# =============================================================================
+# LANGUAGE DETECTION
+# =============================================================================
 
 def detect_language(text: str) -> str:
-    """Return 'id' or 'en'."""
+    """
+    Detect query language.
+
+    Strategy:
+    1. Cheap keyword heuristic
+    2. LLM fallback only if ambiguous
+
+    Returns:
+        "id" or "en"
+    """
     t = text.strip().lower()
 
-    # Quick heuristic for Indonesian
-    indo_keywords = ["yang", "apa", "bagaimana", "mengapa", "siapa", "berapa", "dengan", "pada", "tidak", "adalah"]
+    indo_keywords = (
+        "yang", "apa", "bagaimana", "mengapa",
+        "siapa", "berapa", "dengan", "pada",
+        "tidak", "adalah",
+    )
     if any(k in t for k in indo_keywords):
         return "id"
 
-    # If contains “the”, “is”, “which”, assume English
-    eng_keywords = ["what", "how", "which", "who", "when", "why", "the", "is"]
+    eng_keywords = (
+        "what", "how", "which", "who",
+        "when", "why", "the", "is",
+    )
     if any(k in t for k in eng_keywords):
         return "en"
 
-    # Fallback to LLM detection
+    # Fallback: LLM detection
     lang = llm.run(
-        f"Detect if this text is Indonesian or English. Reply only 'id' or 'en':\n\n{text}",
-        temperature=0.0
+        "Detect if this text is Indonesian or English. "
+        "Reply only with 'id' or 'en'.\n\n"
+        f"{text}",
+        temperature=0.0,
     ).strip().lower()
 
     return "id" if "id" in lang else "en"
 
+# =============================================================================
+# DOMAIN GUARDRAILS
+# =============================================================================
 
-# =====================================================================
-# SAFE DOMAIN RULES
-# Never rewrite fraud/merchant/regulatory questions — they are precise.
-# =====================================================================
-
-DOMAIN_KEYWORDS = [
+DOMAIN_KEYWORDS = (
     "merchant", "merchants",
     "category", "categories",
-
     "fraud rate", "fraud rates",
     "fraudulent",
-
     "card-not-present", "card not present",
     "cross-border", "cross border",
-
     "eea", "eba", "ecb", "psd2",
-
     "transaction counterpart",
     "domestic", "international",
-]
+)
 
 
-def is_domain_specific(q: str) -> bool:
-    ql = q.lower()
-    return any(k in ql for k in DOMAIN_KEYWORDS)
+def is_domain_specific(query: str) -> bool:
+    """
+    Domain-specific queries are assumed to be precise
+    and must NOT be rewritten.
+    """
+    q = query.lower()
+    return any(k in q for k in DOMAIN_KEYWORDS)
 
-
-# =====================================================================
+# =============================================================================
 # TRANSLATION UTILITIES
-# =====================================================================
+# =============================================================================
 
 def translate_id_to_en(text: str) -> str:
-    """Translate Indonesian → English, preserving meaning."""
+    """Translate Indonesian → English without altering meaning."""
     return llm.run(
-        f"Translate this to English without adding new meaning:\n{text}",
-        temperature=0.0
+        "Translate the following text to English without adding new meaning:\n"
+        f"{text}",
+        temperature=0.0,
     ).strip()
 
 
 def translate_en_to_id(text: str) -> str:
-    """Translate English → Indonesian."""
+    """Translate English → Indonesian clearly and professionally."""
     return llm.run(
-        f"Translate this to Indonesian clearly and professionally:\n{text}",
-        temperature=0.0
+        "Translate the following text to Indonesian clearly and professionally:\n"
+        f"{text}",
+        temperature=0.0,
     ).strip()
 
-
-# =====================================================================
+# =============================================================================
 # REWRITE LOGIC
-# =====================================================================
+# =============================================================================
 
 REWRITE_PROMPT = """
-Rewrite the user query to be clearer and more retrieval-friendly,
-but DO NOT add or assume facts. DO NOT introduce new entities.
-Keep meaning EXACTLY the same.
+Rewrite the user query to be clearer and more retrieval-friendly.
+
+Rules:
+- Do NOT add facts
+- Do NOT assume missing information
+- Do NOT introduce new entities
+- Preserve the original meaning EXACTLY
 
 User query:
 {q}
 
 Return only the rewritten query.
-"""
+""".strip()
 
 
-def rewrite_query(q: str) -> str:
-    """Rewrite using LLM with strict instructions."""
-    out = llm.run(
-        REWRITE_PROMPT.format(q=q),
-        temperature=0.0
+def rewrite_query(query: str) -> str:
+    """
+    Rewrite a vague query using LLM with strict constraints.
+    """
+    rewritten = llm.run(
+        REWRITE_PROMPT.format(q=query),
+        temperature=0.0,
     ).strip()
 
-    # Clean artifacts
-    out = re.sub(r"^\"|\"$", "", out)
-    return out
+    # Remove accidental quotation artifacts
+    rewritten = re.sub(r'^"|"$', "", rewritten)
+    return rewritten
 
-
-# =====================================================================
+# =============================================================================
 # MAIN ENTRYPOINT
-# =====================================================================
+# =============================================================================
 
 def process_query(original_query: str) -> Tuple[str, Dict]:
     """
-    Main function:
-      - Detect language
-      - Translate to English if needed
-      - Skip rewrite for domain-specific queries
-      - Rewrite only vague questions
-      - Return rewritten_query + metadata
-    """
-    q = original_query.strip()
-    lang = detect_language(q)
+    Process a user query for retrieval.
 
-    meta = {
+    Flow:
+    1. Detect language
+    2. Translate to English if needed
+    3. Block rewrite for domain-specific queries
+    4. Rewrite ONLY vague questions
+    5. Return final query + metadata
+    """
+    query = original_query.strip()
+    lang = detect_language(query)
+
+    meta: Dict = {
         "lang": lang,
         "rewritten": False,
         "translated": False,
@@ -140,27 +167,29 @@ def process_query(original_query: str) -> Tuple[str, Dict]:
         "final_query_en": None,
     }
 
-    # Translate Indonesian → English (retriever uses English)
+    # Step 1 — translation (retriever operates in English)
     if lang == "id":
-        q_en = translate_id_to_en(q)
+        query_en = translate_id_to_en(query)
         meta["translated"] = True
     else:
-        q_en = q
+        query_en = query
 
-    # 1. BLOCK rewrite for precise domain questions
-    if is_domain_specific(q_en):
-        meta["final_query_en"] = q_en
-        return q_en, meta
+    # Step 2 — block rewrite for precise domain questions
+    if is_domain_specific(query_en):
+        meta["final_query_en"] = query_en
+        return query_en, meta
 
-    # 2. Rewrite ONLY if vague (heuristic)
-    vague_keywords = ["explain", "describe", "tell me about", "what is", "how does"]
-    if not any(k in q_en.lower() for k in vague_keywords):
-        # Not vague → no rewrite
-        meta["final_query_en"] = q_en
-        return q_en, meta
+    # Step 3 — rewrite only vague queries
+    vague_markers = (
+        "explain", "describe", "tell me about",
+        "what is", "how does",
+    )
+    if not any(k in query_en.lower() for k in vague_markers):
+        meta["final_query_en"] = query_en
+        return query_en, meta
 
-    # 3. Perform rewrite
-    rewritten = rewrite_query(q_en)
+    # Step 4 — controlled rewrite
+    rewritten = rewrite_query(query_en)
     meta["rewritten"] = True
     meta["final_query_en"] = rewritten
 

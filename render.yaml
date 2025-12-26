@@ -1,10 +1,9 @@
 services:
   - type: web
     name: ai-fraud-agent
-    env: python
+    runtime: docker
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+
     envVars:
       - key: OPENAI_API_KEY
         sync: false
@@ -16,5 +15,11 @@ services:
         sync: false
       - key: SUPABASE_DB_URL
         sync: false
+
+      # Optional defaults
       - key: DEFAULT_MODEL
         value: gpt-4o-mini
+      - key: EMBEDDINGS_ENABLED
+        value: "true"
+      - key: RETRIEVER_ENABLED
+        value: "true"

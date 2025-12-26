@@ -1,8 +1,24 @@
-# ui/streamlit_app.py
+"""
+STREAMLIT UI — AI FRAUD INTELLIGENCE AGENT
+-----------------------------------------
+
+Responsibilities:
+- User interaction & visualization
+- Guardrails enforcement before orchestration
+- Safe rendering (XSS-protected)
+- Conversation state management
+- Analytics & RAG result presentation
+
+Design principles:
+- Never trust user input
+- Never render raw HTML from LLM
+- Stateless backend, stateful UI
+"""
 
 import streamlit as st
 from datetime import datetime
 from html import escape
+from typing import Any
 
 from src.safety.guardrails import validate_query
 from src.orchestrator import run_query
@@ -13,10 +29,10 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# =============================================================================
+# PAGE CONFIGURATION
+# =============================================================================
 
-# ======================================================
-# PAGE CONFIG
-# ======================================================
 st.set_page_config(
     page_title="Fraud Intelligence Agent",
     page_icon="🧠",
@@ -24,17 +40,21 @@ st.set_page_config(
 )
 
 st.markdown(
-    "<h1 style='margin-bottom: 0.2rem;'>🧠 Mekari Fraud Intelligence Agent</h1>",
+    "<h1 style='margin-bottom:0.2rem;'>🧠 Fraud Intelligence AI Platform
+</h1>",
     unsafe_allow_html=True,
 )
 st.caption("Fraud analytics · Fraud Doc RAG · Multilingual assistant")
 
+# =============================================================================
+# SANITIZATION UTILITIES (XSS PROTECTION)
+# =============================================================================
 
-# ======================================================
-# RECURSIVE SANITIZATION
-# ======================================================
-def sanitize_recursive(obj):
-    """Escape all strings deeply in dicts / lists."""
+def sanitize_recursive(obj: Any):
+    """
+    Recursively escape all strings inside nested structures.
+    Prevents XSS when rendering LLM or user-generated content.
+    """
     if isinstance(obj, str):
         return escape(obj)
 
@@ -48,32 +68,41 @@ def sanitize_recursive(obj):
 
 
 def sanitize_message_history():
-    """Sanitize all existing messages in session state to remove legacy HTML."""
+    """
+    Sanitize existing session messages (backward compatibility
+    for legacy unsanitized content).
+    """
     if "messages" not in st.session_state:
         return
-    for m in st.session_state.messages:
-        m["content"] = sanitize_recursive(m.get("content"))
 
+    for msg in st.session_state.messages:
+        msg["content"] = sanitize_recursive(msg.get("content"))
 
-# ======================================================
-# SESSION STATE
-# ======================================================
+# =============================================================================
+# SESSION STATE INITIALIZATION
+# =============================================================================
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 if "clear_input" not in st.session_state:
     st.session_state.clear_input = False
 
-# Clean old legacy messages
 sanitize_message_history()
 
-
-# ======================================================
+# =============================================================================
 # ORCHESTRATOR WRAPPER
-# ======================================================
-def _handle_query(query: str):
+# =============================================================================
 
-    # ----- Guardrails -----
+def handle_query(query: str) -> dict:
+    """
+    End-to-end query handler:
+    - Guardrails
+    - Orchestration
+    - Sanitization
+    """
+
+    # ---------------- Guardrails ----------------
     is_valid, cleaned, lang = validate_query(query)
 
     if not is_valid:
@@ -83,117 +112,114 @@ def _handle_query(query: str):
             "details": None,
         }
 
-    # ----- Orchestrator -----
-    out = run_query(cleaned, detected_lang=lang)
+    # ---------------- Orchestrator ----------------
+    result = run_query(cleaned, detected_lang=lang)
 
-    if out.get("error"):
+    if result.get("error"):
         return {
             "type": "error",
             "error": "Orchestrator failed.",
-            "details": escape(str(out.get("error"))),
+            "details": escape(str(result.get("error"))),
         }
 
-    # ----- Build final payload -----
-    result = out.get("result", {})
-    result["_query"] = escape(str(out.get("query")))
-    result["_intent"] = escape(str(out.get("intent")))
-    result["_lang"] = lang
+    payload = result.get("result", {})
+    payload["_query"] = escape(str(result.get("query")))
+    payload["_intent"] = escape(str(result.get("intent")))
+    payload["_lang"] = lang
 
-    # CRITICAL — sanitize before returning
-    return sanitize_recursive(result)
+    # CRITICAL: sanitize before returning to UI
+    return sanitize_recursive(payload)
 
-
-# ======================================================
+# =============================================================================
 # LAYOUT
-# ======================================================
+# =============================================================================
+
 col_chat, col_side = st.columns([0.68, 0.32])
 
+# =============================================================================
+# LEFT PANEL — CHAT INTERFACE
+# =============================================================================
 
-# ======================================================
-# LEFT PANEL — CHAT
-# ======================================================
 with col_chat:
-
     st.markdown("### 💬 Conversation")
-
     chat_container = st.container()
 
     with chat_container:
-        msgs = st.session_state.messages
+        messages = st.session_state.messages
 
-        if not msgs:
+        if not messages:
             st.info("Ask a question to begin.")
         else:
-            # ---- HISTORY ----
-            if len(msgs) > 2:
+            # -------- Conversation History --------
+            if len(messages) > 2:
                 with st.expander("📜 History (previous turns)"):
-                    for m in msgs[:-2]:
+                    for m in messages[:-2]:
                         render_chat_message(m)
 
-            # ---- LATEST TURN ----
-            if len(msgs) >= 2:
-                render_chat_message(msgs[-2])
-                render_chat_message(msgs[-1])
+            # -------- Latest Turn --------
+            if len(messages) >= 2:
+                render_chat_message(messages[-2])
+                render_chat_message(messages[-1])
             else:
-                render_chat_message(msgs[0])
+                render_chat_message(messages[0])
 
+        # Auto-scroll
         st.markdown(
             "<script>window.scrollTo(0, document.body.scrollHeight);</script>",
             unsafe_allow_html=True,
         )
 
-    # ---- CLEAR BUTTON ----
+    # -------- Clear Conversation --------
     if st.button("🗑️ Clear Conversation", use_container_width=True):
         st.session_state.messages = []
         st.session_state.chat_input = ""
         st.session_state.clear_input = False
         st.rerun()
 
-    # ---- USER INPUT ----
+    # -------- User Input --------
     st.markdown("---")
     user_input = st.text_input(
         "Your question:",
-        placeholder="Ask about fraud rates, merchant risk, cross-border patterns, or regulations…",
+        placeholder=(
+            "Ask about fraud rates, merchant risk, "
+            "cross-border patterns, or regulations…"
+        ),
         key="chat_input",
         label_visibility="collapsed",
     )
 
     send = st.button("Ask", use_container_width=True)
 
-
-# ======================================================
+# =============================================================================
 # SUBMIT HANDLER
-# ======================================================
-if send and user_input.strip():
+# =============================================================================
 
+if send and user_input.strip():
     safe_query = escape(user_input.strip())
 
-    # Save user message (HTML safe)
+    # Save user message
     st.session_state.messages.append(
         {"role": "user", "content": safe_query, "time": datetime.now()}
     )
 
-    # Request
     with st.spinner("Analyzing..."):
-        result = _handle_query(safe_query)
+        response = handle_query(safe_query)
 
-    # Save assistant message (ALREADY SANITIZED)
+    # Save assistant message (already sanitized)
     st.session_state.messages.append(
-        {"role": "assistant", "content": result, "time": datetime.now()}
+        {"role": "assistant", "content": response, "time": datetime.now()}
     )
 
     st.session_state.clear_input = True
     st.rerun()
 
+# =============================================================================
+# RIGHT PANEL — RESULT DETAILS
+# =============================================================================
 
-# ======================================================
-# RIGHT PANEL — DETAILS
-# ======================================================
 with col_side:
+    st.markdown("### 📊 Result")
 
-    st.markdown("### 📊 Analytics Result")
-
-    # Find latest assistant message
     last_assistant = next(
         (m for m in reversed(st.session_state.messages) if m["role"] == "assistant"),
         None,
@@ -211,20 +237,27 @@ with col_side:
 
     ptype = payload.get("type")
 
-    # ----- ERROR -----
+    # ---------------- ERROR ----------------
     if ptype == "error":
         st.error(payload.get("error", "Error"))
         if payload.get("details"):
             st.code(payload["details"])
         st.stop()
 
-    # ----- ANALYTICS -----
+    # ---------------- ANALYTICS ----------------
     if ptype == "analytics":
         analytics = payload.get("analytics", {})
 
         st.markdown("#### 📈 Summary")
-        summary = escape(analytics.get("answer") or payload.get("answer") or "")
-        st.markdown(f"<div style='white-space:pre-wrap;'>{summary}</div>", unsafe_allow_html=True)
+        summary = escape(
+            analytics.get("answer")
+            or payload.get("answer")
+            or ""
+        )
+        st.markdown(
+            f"<div style='white-space:pre-wrap;'>{summary}</div>",
+            unsafe_allow_html=True,
+        )
 
         conf = analytics.get("confidence")
         if isinstance(conf, (int, float)):
@@ -239,12 +272,19 @@ with col_side:
 
         st.stop()
 
-    # ----- RAG -----
+    # ---------------- RAG ----------------
     if ptype == "rag":
         st.markdown("#### 💡 Insight")
 
-        insight_text = escape(payload.get("insight") or payload.get("answer") or "")
-        st.markdown(f"<div style='white-space:pre-wrap;'>{insight_text}</div>", unsafe_allow_html=True)
+        insight = escape(
+            payload.get("insight")
+            or payload.get("answer")
+            or ""
+        )
+        st.markdown(
+            f"<div style='white-space:pre-wrap;'>{insight}</div>",
+            unsafe_allow_html=True,
+        )
 
         score = payload.get("score", {}).get("final_score")
         if isinstance(score, (int, float)):
@@ -259,5 +299,5 @@ with col_side:
 
         st.stop()
 
-    # ----- FALLBACK -----
+    # ---------------- FALLBACK ----------------
     st.info("No structured information available.")

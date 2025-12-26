@@ -2,31 +2,64 @@ name: CI
 
 on:
   push:
-    branches: [ main, dev, feature/** ]
+    branches:
+      - main
+      - dev
+      - "feature/**"
   pull_request:
 
 jobs:
   build-test:
+    name: Build · Lint · Test · Docker
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      # --------------------------------------------------
+      # Checkout
+      # --------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v4
+      # --------------------------------------------------
+      # Python setup
+      # --------------------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      - name: Install deps
-        run: pip install -r requirements.txt
+      # --------------------------------------------------
+      # Dependencies
+      # --------------------------------------------------
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Lint
+      # --------------------------------------------------
+      # Linting
+      # --------------------------------------------------
+      - name: Lint (ruff)
         run: |
           pip install ruff
           ruff check src
 
-      # - name: Run tests
-      #   run: pytest -q
+      # --------------------------------------------------
+      # Tests (LLM-safe)
+      # --------------------------------------------------
       - name: Run tests (skip LLM)
-        run: pytest -q -m "not llm"
-      - name: Build Docker
-        run: docker build -t fraud-agent:ci .
+        env:
+          OPENAI_API_KEY: ""
+          PHOENIX_ENABLED: "false"
+          RETRIEVER_ENABLED: "false"
+          EMBEDDINGS_ENABLED: "false"
+        run: |
+          pytest -q -m "not llm"
+
+      # --------------------------------------------------
+      # Docker build validation
+      # --------------------------------------------------
+      - name: Build Docker image
+        run: |
+          docker build -t fraud-agent:ci .

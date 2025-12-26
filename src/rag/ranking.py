@@ -1,132 +1,120 @@
 """
-Enterprise Hybrid Reranker 
+Enterprise Hybrid Reranker
 
-This module implements a 3-stage ranking pipeline:
+Implements a multi-stage ranking pipeline:
 
-    1. Embedding-based similarity 
-    2. BM25 relevance (keyword overlap)
-    3. (optional) LLM cross-encoder reranking
+1. Embedding-based semantic similarity
+2. BM25 keyword relevance
+3. Optional LLM cross-encoder reranking
 
-Additional enterprise enhancements:
- - score normalization
- - document-aware boosting (Bhatla vs EBA/ECB)
- - chunk coherence scoring (penalize low-information chunks)
- - redundancy removal (duplicate / overlapping chunks)
- - final hybrid score fusion
+Enterprise enhancements:
+- Score normalization & adaptive weighting
+- Source-aware boosting (regulatory vs research docs)
+- Chunk coherence scoring
+- Redundancy removal
+- Hybrid score fusion with graceful degradation
 
-This is used by rag_chain.py.
+Used by: rag_chain.py
 """
 
-import numpy as np
+import os
 from typing import List, Dict, Any, Optional
-# from collections import Counter
 
-from rank_bm25 import BM25Okapi  
+import numpy as np
+from rank_bm25 import BM25Okapi
 
 from src.embeddings.embedder import embedding_model
 from src.llm.llm_client import llm
 from src.utils.logger import get_logger
-import os
-
-EMBEDDINGS_AVAILABLE = bool(os.getenv("OPENAI_API_KEY"))
-
 
 logger = get_logger(__name__)
 
+EMBEDDINGS_AVAILABLE = bool(os.getenv("OPENAI_API_KEY"))
 
-# ======================================================
-# Utility: cosine similarity
-# ======================================================
+# =============================================================================
+# VECTOR SIMILARITY
+# =============================================================================
 
 def cosine_similarity(a: List[float], b: List[float]) -> float:
-    a = np.array(a)
-    b = np.array(b)
-    denom = (np.linalg.norm(a) * np.linalg.norm(b) + 1e-10)
-    return float(np.dot(a, b) / denom)
+    """Compute cosine similarity with numerical safety."""
+    va = np.array(a)
+    vb = np.array(b)
+    denom = np.linalg.norm(va) * np.linalg.norm(vb) + 1e-10
+    return float(np.dot(va, vb) / denom)
 
-
-# ======================================================
-# Stage 0 — Deduplication
-# ======================================================
+# =============================================================================
+# STAGE 0 — DEDUPLICATION
+# =============================================================================
 
 def _deduplicate_chunks(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Remove redundant or duplicate chunks.
+    Remove near-duplicate chunks based on source, page, and content prefix.
     """
     seen = set()
-    cleaned = []
+    unique_chunks: List[Dict[str, Any]] = []
 
     for c in chunks:
-        key = (c["source_name"], c["page"], c["content"][:60])
+        key = (c.get("source_name"), c.get("page"), (c.get("content") or "")[:60])
         if key not in seen:
-            cleaned.append(c)
             seen.add(key)
+            unique_chunks.append(c)
 
-    if len(cleaned) < len(chunks):
-        logger.info(f"[ranking] Dedup removed {len(chunks) - len(cleaned)} chunks")
+    if len(unique_chunks) < len(chunks):
+        logger.info(
+            f"[ranking] Deduplicated {len(chunks) - len(unique_chunks)} chunks"
+        )
 
-    return cleaned
+    return unique_chunks
 
+# =============================================================================
+# STAGE 1 — EMBEDDING SIMILARITY
+# =============================================================================
 
-# ======================================================
-# Stage 1 — Embedding similarity
-# ======================================================
-
-# def _embedding_scores(query: str, chunks: List[Dict[str, Any]]) -> List[float]:
-#     query_vec = embedding_model.embed_one(query)
-#     scores = []
-
-#     for c in chunks:
-#         vec = embedding_model.embed_one(c["content"])
-#         sim = cosine_similarity(query_vec, vec)
-#         scores.append(sim)
-
-#     return scores
 def _embedding_scores(query: str, chunks: List[Dict[str, Any]]) -> List[float]:
     """
-    Returns embedding similarity scores.
-    Falls back to zeros when embeddings are unavailable (CI / offline).
+    Compute embedding similarity scores.
+    Falls back to zeros when embeddings are unavailable
+    (e.g. CI, offline, or cost-restricted environments).
     """
     if not EMBEDDINGS_AVAILABLE:
-        logger.info("[ranking] Embeddings disabled — using zeros")
+        logger.info("[ranking] Embeddings disabled — using zero scores")
         return [0.0] * len(chunks)
 
     query_vec = embedding_model.embed_one(query)
-    scores = []
+    scores: List[float] = []
 
     for c in chunks:
         vec = embedding_model.embed_one(c["content"])
-        sim = cosine_similarity(query_vec, vec)
-        scores.append(sim)
+        scores.append(cosine_similarity(query_vec, vec))
 
     return scores
 
-
-# ======================================================
-# Stage 2 — BM25 keyword relevance
-# ======================================================
+# =============================================================================
+# STAGE 2 — BM25 KEYWORD RELEVANCE
+# =============================================================================
 
 def _bm25_scores(query: str, chunks: List[Dict[str, Any]]) -> List[float]:
+    """
+    Compute normalized BM25 relevance scores.
+    """
     tokenized_docs = [c["content"].lower().split() for c in chunks]
     tokenized_query = query.lower().split()
 
     bm25 = BM25Okapi(tokenized_docs)
     scores = bm25.get_scores(tokenized_query)
 
-    # Normalize BM25 scores
     if scores.max() > 0:
         scores = scores / scores.max()
 
     return scores.tolist()
 
-
-# ======================================================
-# Chunk coherence scoring
-# ======================================================
+# =============================================================================
+# CHUNK COHERENCE HEURISTIC
+# =============================================================================
 
 def _coherence_score(text: str) -> float:
     """
-    Heuristic: penalize extremely short or noisy chunks.
+    Penalize very short or low-information chunks.
     """
     length = len(text.split())
     if length < 20:
@@ -135,27 +123,31 @@ def _coherence_score(text: str) -> float:
         return 0.6
     return 1.0
 
-
-# ======================================================
-# Source-aware boosting
-# ======================================================
+# =============================================================================
+# SOURCE-AWARE BOOSTING
+# =============================================================================
 
 def _source_boost(query: str, source: str) -> float:
+    """
+    Boost relevance based on query intent and document provenance.
+    """
     q = query.lower()
     s = source.lower()
 
-    if "eea" in q or "cross-border" in q or "h1 2023" in q:
-        return 1.25 if "eba" in s or "ecb" in s else 1.0
+    if any(k in q for k in ("eea", "cross-border", "h1 2023")):
+        return 1.25 if any(k in s for k in ("eba", "ecb")) else 1.0
 
-    if any(k in q for k in ["methods", "card-not-present", "lost or stolen", "counterfeit", "typology"]):
+    if any(k in q for k in (
+        "methods", "card-not-present", "lost or stolen",
+        "counterfeit", "typology"
+    )):
         return 1.25 if "bhatla" in s else 1.0
 
     return 1.0
 
-
-# ======================================================
-# Stage 3 — LLM Cross-encoder reranking (optional)
-# ======================================================
+# =============================================================================
+# STAGE 3 — OPTIONAL LLM CROSS-ENCODER
+# =============================================================================
 
 LLM_RERANK_PROMPT = """
 Rate the relevance of the following chunk to the query.
@@ -167,51 +159,42 @@ Query:
 
 Chunk:
 {chunk}
-"""
+""".strip()
 
-def _rerank_by_llm(query: str, chunks: List[Dict[str, Any]], top_n: int) -> List[float]:
-    scores = []
+
+def _rerank_by_llm(
+    query: str,
+    chunks: List[Dict[str, Any]],
+    top_n: int,
+) -> List[float]:
+    """
+    Expensive but precise LLM-based cross-encoder reranking.
+    Applied only to the top-N chunks.
+    """
+    scores: List[float] = []
 
     for c in chunks[:top_n]:
-        px = LLM_RERANK_PROMPT.format(query=query, chunk=c["content"])
-        resp = llm.run(px, temperature=0.0)
+        prompt = LLM_RERANK_PROMPT.format(
+            query=query,
+            chunk=c["content"],
+        )
+        resp = llm.run(prompt, temperature=0.0)
 
         try:
-            s = float(resp.strip())
+            score = float(resp.strip())
         except Exception:
-            s = 0.0
+            score = 0.0
 
-        scores.append(s)
+        scores.append(score)
 
-    # pad scores for remaining chunks
     if len(chunks) > top_n:
         scores.extend([0.0] * (len(chunks) - top_n))
 
     return scores
 
-
-# ======================================================
-# Hybrid Fusion
-# ======================================================
-
-# def _fuse_scores(emb: List[float], bm25: List[float], coh: List[float], boost: List[float],
-#                  llm_scores: Optional[List[float]]) -> List[float]:
-#     fused = []
-
-#     for i in range(len(emb)):
-#         score = (
-#             0.45 * emb[i] +
-#             0.35 * bm25[i] +
-#             0.10 * coh[i] +
-#             0.10 * boost[i]
-#         )
-
-#         if llm_scores:
-#             score = 0.7 * score + 0.3 * llm_scores[i]
-
-#         fused.append(score)
-
-#     return fused
+# =============================================================================
+# HYBRID SCORE FUSION
+# =============================================================================
 
 def _fuse_scores(
     emb: List[float],
@@ -220,13 +203,14 @@ def _fuse_scores(
     boost: List[float],
     llm_scores: Optional[List[float]],
 ) -> List[float]:
-
-    fused = []
-
-    use_emb = any(e > 0 for e in emb)
+    """
+    Fuse all signals into a single hybrid relevance score.
+    """
+    fused: List[float] = []
+    use_embeddings = any(e > 0 for e in emb)
 
     for i in range(len(bm25)):
-        if use_emb:
+        if use_embeddings:
             score = (
                 0.45 * emb[i] +
                 0.35 * bm25[i] +
@@ -234,7 +218,6 @@ def _fuse_scores(
                 0.10 * boost[i]
             )
         else:
-            # Re-weight when embeddings are disabled
             score = (
                 0.55 * bm25[i] +
                 0.25 * coh[i] +
@@ -248,55 +231,61 @@ def _fuse_scores(
 
     return fused
 
-# ======================================================
-# MAIN API — used by rag_chain.py
-# ======================================================
+# =============================================================================
+# PUBLIC API
+# =============================================================================
 
 def rerank_chunks(
     query: str,
     chunks: List[Dict[str, Any]],
     use_llm: bool = False,
-    top_k: Optional[int] = None
+    top_k: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-
+    """
+    Rank document chunks using a hybrid relevance strategy.
+    """
     if not chunks:
         return []
 
-    # Step 0 — De-duplicate
+    # Stage 0 — Deduplication
     chunks = _deduplicate_chunks(chunks)
 
-    # Step 1 — Emb sim
-    emb = _embedding_scores(query, chunks)
+    # Stage 1 — Semantic similarity
+    emb_scores = _embedding_scores(query, chunks)
 
-    # Step 2 — BM25
-    bm25 = _bm25_scores(query, chunks)
+    # Stage 2 — Keyword relevance
+    bm25_scores = _bm25_scores(query, chunks)
 
-    # Coherence
-    coh = [_coherence_score(c["content"]) for c in chunks]
+    # Coherence & source priors
+    coherence = [_coherence_score(c["content"]) for c in chunks]
+    boosts = [_source_boost(query, c["source_name"]) for c in chunks]
 
-    # Source boosts
-    boost = [_source_boost(query, c["source_name"]) for c in chunks]
-
-    # Step 3 (optional) — LLM cross-encoder
+    # Stage 3 — Optional LLM reranking
     llm_scores = None
     if use_llm:
-        logger.info("[ranking] Running expensive LLM reranking on top 8 chunks...")
+        logger.info("[ranking] Running LLM reranking on top chunks")
         llm_scores = _rerank_by_llm(query, chunks, top_n=8)
 
     # Hybrid fusion
-    hybrid = _fuse_scores(emb, bm25, coh, boost, llm_scores)
+    hybrid_scores = _fuse_scores(
+        emb_scores,
+        bm25_scores,
+        coherence,
+        boosts,
+        llm_scores,
+    )
 
-    # Attach & sort
+    # Attach scores
     for i, c in enumerate(chunks):
-        c["rerank_score"] = hybrid[i]
+        c["rerank_score"] = hybrid_scores[i]
 
     ranked = sorted(chunks, key=lambda x: x["rerank_score"], reverse=True)
 
-    # Top-K cut
+    # Top-K truncation
     if top_k is not None:
         ranked = ranked[:top_k]
 
-    # Clean internal fields
+    # Cleanup
     for c in ranked:
         c.pop("rerank_score", None)
 

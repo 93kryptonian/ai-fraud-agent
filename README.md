@@ -1,337 +1,450 @@
-# AI Fraud Intelligence System
+## 1. Problem Framing
 
-This project implements an end-to-end **Fraud Intelligence & Analytics System** combining:
+Fraud Agents Enhanced addresses a **hybrid fraud intelligence problem** that sits between
+*qualitative regulatory knowledge* and *quantitative transaction analytics*.
 
-- Retrieval-Augmented Generation (RAG) over regulatory PDFs (Bhatla, EBA/ECB 2024)
-- SQL-driven fraud analytics over transaction data
-- Multilingual support (English/Indonesian)
-- Enterprise-grade guardrails, safety, rewriting, and scoring
-- Streamlit UI components for chat, trace viewer, and charts
-- Clean, modular backend orchestrator
+In real-world fraud teams, analysts must constantly answer two fundamentally different
+classes of questions:
 
-The system is designed for **accuracy**, **coverage**, **readability**, **robust exception handling**, and **performance.**
+1. **Knowledge-driven fraud questions**  
+   - *“What are the dominant card-not-present fraud techniques?”*  
+   - *“Which merchant behaviors are associated with higher fraud exposure?”*  
+   - *“How does cross-border fraud differ inside vs outside the EEA?”*  
 
----
+2. **Data-driven fraud questions**  
+   - *“How does the daily or monthly fraud rate evolve over time?”*  
+   - *“Which merchants or categories have the highest observed fraud rate?”*  
+   - *“What patterns emerge when aggregating fraud transactions by region?”*
 
-# 1. Architecture Overview
-
-```
-User → Orchestrator → (Intent Classifier)
-          ├── Analytics Pipeline → SQL → Supabase → Summary + Chart
-          └── RAG Pipeline → Retriever → Reranker → LLM → Scoring → Insight
-```
-
-### Main Components
-
-| Module                        | Responsibility                                                                                                           |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `src/orchestrator.py`       | Central router: sanitizes input, detects language, rewrites questions, routes analytics vs RAG, scoring, fallback logic. |
-| `src/rag/`                  | RAG pipeline (retrieval, reranking, prompt building, insight layer).                                                     |
-| `src/analytics/`            | Natural-language-to-SQL analytics engine with summaries + charts.                                                        |
-| `src/llm/`                  | Unified LLM wrapper (cost guardrail, retry, schema validation).                                                          |
-| `src/db/supabase_client.py` | Supabase client + PostgreSQL direct connection.                                                                          |
-| `src/embeddings/`           | OpenAI embedding model wrapper.                                                                                          |
-| `ui/components/`            | Streamlit chat window, charts, citation viewer.                                                                          |
-| `ingest_docs.py`            | PDF ingestion to Supabase (page-based embedding).                                                                        |
-| `ingest_tabular.py`         | Fraud CSV ingestion to PostgreSQL.                                                                                       |
+Most systems incorrectly treat these as the **same problem**.
 
 ---
 
-# 2. RAG Pipeline
+### Why simple rules fail
 
-## 2.1 Retrieval
+Rule-based systems break down quickly because:
 
-`retriever_direct.py`
-
-- Uses Supabase RPC `match_documents` for vector similarity.
-- Optionally filters by document source.
-- Returns top-K contextual rows (page, content, similarity).
-
-## 2.2 Ranking
-
-`reranker_hybrid.py` implements:
-
-- Deduplication
-- Embedding similarity
-- BM25 keyword match
-- Coherence scoring
-- Document-aware boosts
-- Optional LLM cross-encoder reranking
-- Hybrid score fusion
-
-## 2.3 Prompting
-
-`rag_chain.py` assembles:
-
-- Context (max 12k chars)
-- RAG system prompt
-- Multilingual answer instruction
-- Fallback answer
-
-Special case: **Merchant Fraud Inference Mode** loads all merchant-related pages for high-accuracy reasoning.
-
-## 2.4 Insight Layer
-
-`insight_layer.py`
-
-- Generates 3–5 sentence grounded insights (EN/ID)
-- No hallucinations; based only on answer + context
-
-## 2.5 Scoring
-
-`scoring.py`
-
-- Lightweight answer grade (length-based + keyword overlap)
-- Used for low-confidence fallback
+- Fraud tactics evolve faster than static rules
+- Rules cannot explain *why* a pattern exists
+- Maintenance cost grows non-linearly with rule count
+- Regulatory or research-based knowledge cannot be encoded reliably as rules
 
 ---
 
-# 3. Analytics Pipeline
+### Why standalone ML models are insufficient
 
-## 3.1 Intent Detection
+Pure ML approaches also fail in isolation:
 
-`classify_analytics_intent()` distinguishes:
-
-- `timeseries`
-- `merchant_rank`
-- `category_rank`
-- `generic`
-
-## 3.2 NL → SQL
-
-`nl_to_sql()`
-
-- Hard-coded templates for merchant/category ranking
-- Strict daily/monthly time-series templates
-- Controlled LLM SQL generation for generic questions
-- Safety guardrails: SELECT-only, no DML
-
-## 3.3 SQL Execution
-
-Via `DB.sql()` using PostgreSQL (Supabase Pooler).
-
-## 3.4 Summary Builders
-
-### Timeseries
-
-- Trend detection
-- Min/max
-- Volatility
-- Confidence score
-
-### Rankings
-
-- Top entity
-- Contribution
-- Fraud rate
-
-## 3.5 Optional LLM Refinement
-
-Shortens and polishes summaries without altering numbers.
-
-## 3.6 UI Output
-
-Analytics returns:
-
-- Summary text
-- Data points
-- Chart data
-- Confidence
+- Models optimize for prediction, not **explanation**
+- They cannot answer conceptual or regulatory questions
+- Analysts still need narrative, traceability, and citations
+- Black-box outputs are hard to justify in audits or investigations
 
 ---
 
-# 4. Orchestrator
+### Core insight
 
-`orchestrator.py` is the heart of the system.
+**Fraud intelligence is not a single-model problem.**
 
-### Responsibilities
+It requires:
+- **Retrieval-Augmented Generation (RAG)** for grounded, explainable knowledge
+- **Analytical computation** for time-series and aggregation logic
+- **Orchestration and routing** to decide *which reasoning mode applies per query*
 
-1. Sanitize query input
-2. Detect user language
-3. Detect intent (analytics vs RAG)
-4. Safe rewrite + domain checks
-5. Route to analytics or RAG
-6. Score the answer
-7. Fallback if low confidence
-8. Generate insights
-9. Translate output if Indonesian
+Fraud Agents Enhanced is designed explicitly around this separation.
 
-### Fallback behavior
 
-If `final_score < 0.12`, reply with a strict domain fallback message.
+## 2. System Architecture
 
----
+Fraud Agents Enhanced is built as a **modular, agent-orchestrated system**
+that dynamically routes each user query to the correct reasoning pathway.
 
-# 5. LLM Client
+At a high level, the system consists of four cooperating layers:
+- Input & Guardrails
+- Orchestration & Routing
+- Reasoning Engines (RAG or Analytics)
+- Output Scoring & Validation
 
-`llm_client.py` wraps OpenAI with:
 
-- Retry logic
-- Cost guardrails per session
-- Automatic downgrade to cheaper model
-- Local model fallback (optional)
-- JSON-block extraction
-- Pydantic schema validation support
+### Agents
 
----
+The system is composed of specialized agents, each with a clearly defined role:
 
-# 6. Ingestion Pipelines
+- **Guardrail Agent**
+  Validates user input, detects prompt injection, enforces domain boundaries,
+  and normalizes multilingual input.
 
-## 6.1 PDF Ingestion
+- **Intent Classification Agent**
+  Determines whether a query requires:
+  - knowledge retrieval (RAG),
+  - data computation (analytics), or
+  - rejection (out of domain).
 
-`ingest_docs.py`
+- **RAG Agent**
+  Answers conceptual, regulatory, and fraud-methodology questions using
+  document-grounded retrieval and citation-based generation.
 
-- Loads each PDF
-- Extracts **pages**, not chunks
-- Computes embeddings in batches
-- Inserts into Supabase `documents` + `document_embeddings`
+- **Analytics Agent**
+  Executes aggregation, ranking, and time-series computation over
+  transaction data (e.g. fraud rate, merchant risk).
 
-Benefit: page-level context is ideal for regulatory/RAG datasets.
+- **Scoring & Insight Agent**
+  Evaluates answer quality using heuristic, embedding, numeric consistency,
+  and optional LLM-based evaluation, then generates higher-level insights.
 
-## 6.2 Fraud CSV Ingestion
 
-`ingest_tabular.py`
+### Orchestration and Routing
 
-- Reads large CSV in 50k-row batches
-- Normalizes timestamps, boolean fields
-- Ensures table structure exists
-- Inserts via PostgreSQL connection
+A central orchestrator coordinates all agents.
 
----
+For every query, the orchestrator:
+1. Sanitizes and validates input
+2. Detects user language
+3. Classifies intent using a hybrid heuristic + LLM approach
+4. Routes the query to the appropriate reasoning engine
+5. Applies confidence scoring and fallback logic
+6. Returns a structured, traceable response
 
-# 7. UI Components (Streamlit)
+This design ensures that **RAG and analytics are never mixed accidentally**,
+preventing incorrect reasoning paths.
 
-### Chat Window
+### RAG vs Analytics
 
-`chat_window.py`
+The system enforces a strict separation:
 
-- Styled bubbles for user + agent
-- Safe HTML escaping
+- **RAG is used when:**
+  - answering "why" or "what" questions
+  - explaining fraud techniques or regulatory findings
+  - grounding answers in reports and documentation
 
-### Charts
+- **Analytics is used when:**
+  - numerical computation is required
+  - trends, rankings, or aggregations are requested
+  - results must be derived from transaction data
 
-`charts.py`
+This boundary is critical. Treating all questions as RAG or all as analytics
+leads to either hallucination or unnecessary computation.
 
-- Auto-detects date labels → line chart
-- Else → bar chart (ranking)
+### Multilingual Support
 
-### Trace Viewer
+Fraud Agents Enhanced natively supports English and Indonesian.
 
-`trace_viewer.py`
+Language detection occurs early in the pipeline and is preserved throughout:
+- queries may be rewritten or translated for internal processing
+- answers are always returned in the user's original language
 
-- Shows page-level citations with expandable blocks
+This design reflects real fraud operations in multilingual regions,
+where analysts and regulators work across languages.
 
----
+### System Architecture Diagram
 
-# 8. Safety & Guardrails
+The following diagram shows the high-level architecture of **AI Fraud Agents Systems**,
+including orchestration, routing logic, and the separation between RAG and analytics.
 
-`safety/guardrails.py`
+![AI Fraud Agents Systems Architecture](docs/architectures.png)
+> Source diagram (Mermaid): [docs/architectures.mmd](docs/architectures.mmd)
 
-- Query length restrictions
-- Prompt-injection detection
-- Domain verification (fraud only)
-- Language detection (EN/ID)
-- Sanitization & noise filtering
+## 3. Key Design Decisions
 
-If invalid → returns structured error messages.
+### Why Intent-Based Routing
 
----
+Fraud-related questions are not homogeneous.
 
-# 9. Testing
+Some queries require:
+- factual explanation grounded in documents (e.g. fraud typologies),
+while others require:
+- numerical computation over transactional data (e.g. fraud rate trends).
 
-`tests/test_runner.py`
+A single-model or single-RAG pipeline cannot reliably handle both.
+This system explicitly classifies intent and routes each query
+to the correct reasoning path, reducing hallucination and misuse
+of language models.
 
-- Runs 6 core queries that validate:
-  - Analytics routing
-  - RAG routing
-  - Structural correctness
-  - Absence of errors
+### Why Hybrid RAG + Analytics
 
----
+Using RAG for analytical questions leads to fabricated numbers.
+Using analytics for conceptual questions leads to shallow explanations.
 
-# 10. Environment Variables
+Fraud Agents Enhanced separates these concerns:
 
-Create `.env` with:
+- **RAG** is used for:
+  - regulatory interpretation
+  - fraud methodology
+  - document-grounded explanations
 
-```
-OPENAI_API_KEY=...
-DEFAULT_MODEL=gpt-4o-mini
-SUPABASE_URL=...
-SUPABASE_ANON_KEY=...
-SUPABASE_SERVICE_ROLE_KEY=...
-SUPABASE_DB_URL=...
-FRAUD_CSV_PATH=data/raw/fraudTrain.csv
-ANALYTICS_USE_LLM_SQL=1
-ANALYTICS_USE_LLM_SUMMARY=0
-```
+- **Analytics** is used for:
+  - fraud rate computation
+  - merchant/category ranking
+  - time-series analysis
 
----
+This hybrid design ensures correctness, interpretability,
+and operational trust.
 
-# 11. Running the System
+### Why Multilingual Support Matters
 
-### Start Streamlit UI
+Fraud operations are inherently multilingual.
 
-```
-streamlit run app.py
-```
+Analysts, regulators, and compliance teams often operate in
+different languages while referencing the same underlying data.
 
-### Run Ingestion
+The system preserves user language across:
+- intent classification
+- query rewriting
+- final response generation
 
-```
-python ingest_docs.py
-python ingest_tabular.py
-```
+This avoids silent translation errors and improves adoption
+in real operational environments.
 
-### Run Tests
+### Why Cost Tracking Is Mandatory
 
-```
-pytest -q
-```
+LLM-based systems incur variable and opaque costs.
 
-or
+Fraud Agents Enhanced includes:
+- per-call token usage estimation
+- session-level cost accumulation
+- automatic fallback to cheaper models when thresholds are exceeded
 
-```
-python tests/test_queries.py
-```
+This makes the system economically predictable and deployable
+in production environments with budget constraints.
 
----
+### Why Scoring and Fallback Exist
 
-# 12. Key Design Strengths
+Not all model outputs are equally reliable.
 
-### ✔ Accuracy
+The system scores each answer using:
+- heuristic grounding checks
+- embedding similarity
+- numeric consistency
+- optional LLM-based evaluation
 
-- Hybrid reranking
-- Merchant inference mode
-- Strict grounding (context-only)
-- Scoring + fallback
+Low-confidence answers trigger explicit fallback responses
+instead of silently returning misleading outputs.
 
-### ✔ Coverage
+## 4. Failure Modes & Safeguards
 
-- Dual pipeline: RAG + SQL analytics
-- Multilingual EN/ID
-- Handles conceptual, regulatory, numerical, and pattern-based questions
+### Failure: Incorrect Reasoning Path
 
-### ✔ Readability
+A common failure in AI systems is routing analytical questions to RAG
+or conceptual questions to data pipelines.
 
-- Clean modular structure
-- Documented modules
-- Consistent naming
+Safeguard:
+- Hybrid intent classification using heuristic rules and LLM verification
+- High-confidence heuristic decisions bypass LLM calls
+- Low-confidence cases trigger LLM-based intent confirmation
 
-### ✔ Exception Handling
+### Failure: Hallucinated or Ungrounded Answers
 
-- Try/except with detailed logs
-- Safe fallbacks for SQL, RAG, ingestion, LLM
-- Input guardrails
+Language models may generate plausible but unsupported explanations,
+especially when context is weak or ambiguous.
 
-### ✔ Performance
+Safeguard:
+- Strict context-only prompting
+- Fallback responses when confidence is below threshold
+- Scoring based on grounding, semantic similarity, and numeric consistency
 
-- Page-level embeddings (52 total)
-- Hybrid scoring avoids expensive cross-encoders unless needed
-- Batched ingestion
-- Cost-aware LLM usage
+### Failure: Numerical Inconsistency
 
----
+Generated answers may contain numbers that do not exist in the source data,
+which is unacceptable in fraud analysis.
 
-# 13. Conclusion
+Safeguard:
+- Numeric extraction from answers and source context
+- Consistency scoring between answer and retrieved evidence
+- Penalization of mismatched values in final confidence score
 
-This codebase is built for **production clarity**, **enterprise-grade reliability**, and **extensibility**. With clear routing, strict constraints, and modular components.
+### Failure: Prompt Injection or Unsafe Queries
+
+Users may attempt to override system instructions or query outside
+the supported fraud domain.
+
+Safeguard:
+- Input sanitization and length constraints
+- Prompt-injection pattern detection
+- Strict domain allowlist enforcement
+- Explicit reject responses for out-of-scope queries
+
+### Failure: Cost Explosion
+
+Uncontrolled LLM usage can lead to unpredictable operational costs.
+
+Safeguard:
+- Session-level cost tracking
+- Hard cost thresholds
+- Automatic fallback to cheaper models
+- Optional disabling of expensive evaluation components
+
+### Failure: System Breakage in CI or Offline Environments
+
+Many AI systems fail during CI due to missing secrets or external dependencies.
+
+Safeguard:
+- Lazy initialization of external clients
+- Feature flags to disable LLM, embeddings, and retrievers
+- Deterministic fallback behavior during tests
+
+## 5. What’s Simplified (Explicit Tradeoffs)
+
+### Simplification: No Custom Model Hosting or Fine-Tuning
+
+This system uses hosted LLM APIs rather than self-hosted or fine-tuned models.
+
+Why:
+- Focus is on system architecture, routing, and safeguards
+- Model quality is treated as an interchangeable dependency
+
+Production Mapping:
+- Replace API models with fine-tuned or self-hosted models if required
+- The LLM interface is abstracted to allow drop-in replacement
+
+### Simplification: Small-Scale Vector Store
+
+The vector database contains a limited number of documents
+designed to demonstrate retrieval logic rather than large-scale indexing.
+
+Why:
+- Emphasizes correctness, grounding, and explainability
+- Avoids premature optimization
+
+Production Mapping:
+- Scale to millions of chunks using sharded vector databases
+- Introduce caching, ANN tuning, and refresh pipelines
+
+### Simplification: Partial LLM-Based Evaluation
+
+LLM-based evaluators (e.g., Phoenix) are optional and disabled by default.
+
+Why:
+- Keeps CI deterministic and fast
+- Avoids external dependencies during testing
+
+Production Mapping:
+- Enable continuous evaluation with sampled traffic
+- Persist evaluation metrics for drift detection and QA dashboards
+
+### Simplification: Session-Level Cost Tracking
+
+Cost controls are enforced at session scope rather than
+per-user, per-team, or per-tenant.
+
+Why:
+- Demonstrates cost-awareness without infrastructure complexity
+
+Production Mapping:
+- Introduce per-user or per-tenant quotas
+- Integrate billing, usage dashboards, and alerts
+
+### Simplification: No End-User Authentication
+
+The system does not implement authentication, authorization,
+or role-based access control.
+
+Why:
+- Focus is on AI decision-making rather than identity management
+
+Production Mapping:
+- Add OAuth/JWT-based authentication
+- Enforce role-based permissions and audit logging
+
+### Simplification: Lightweight UI for Demonstration
+
+The UI is designed for inspection and demonstration, not enterprise UX.
+
+Why:
+- Primary value lies in backend reasoning and safeguards
+
+Production Mapping:
+- Replace UI with internal dashboards or integrate with existing platforms
+
+## 6. How This Maps to Real Production
+
+### CI/CD & Quality Gates
+
+This project includes a CI pipeline that enforces:
+
+- Static analysis (linting)
+- Import-level system integrity tests
+- Deterministic test execution (LLM calls disabled in CI)
+- Container build verification
+
+Why this matters:
+- Prevents regressions in orchestration logic
+- Ensures safety-critical components always load correctly
+
+Production Mapping:
+- Extend tests with shadow traffic evaluation
+- Add regression tests for routing, guardrails, and fallback behavior
+
+### Deployment Strategy
+
+The system is deployed as a stateless FastAPI service.
+
+Characteristics:
+- API-first design
+- No session affinity required
+- Horizontal scaling friendly
+
+Production Mapping:
+- Deploy behind a load balancer
+- Use rolling deployments with zero downtime
+- Separate control-plane (routing, safety) from execution-plane (LLMs)
+
+### Scaling Considerations
+
+The architecture scales along multiple dimensions:
+
+- **Traffic scale** → Stateless API + autoscaling
+- **Data scale** → Independent scaling of analytics DB and vector store
+- **Model scale** → Model abstraction allows easy replacement
+
+Production Mapping:
+- Introduce async execution for heavy analytics
+- Add request prioritization and rate limiting
+
+### Observability & Monitoring
+
+The system emits structured logs at each decision boundary:
+
+- Intent classification
+- Routing decisions
+- Cost accumulation
+- Fallback activation
+- Error conditions
+
+Production Mapping:
+- Centralize logs and traces
+- Add alerting on anomaly rates, cost spikes, and failure patterns
+- Track answer confidence over time
+
+### Reliability & Failure Isolation
+
+The system is designed with graceful degradation:
+
+- Analytics failure → fallback messaging
+- Retrieval failure → safe refusal
+- LLM failure → deterministic error handling
+- Low-confidence output → fallback response
+
+Production Mapping:
+- Add circuit breakers for external APIs
+- Implement retry budgets and backoff strategies
+
+### Security & Governance Readiness
+
+While simplified in this project, the architecture supports:
+
+- Strict domain enforcement
+- Prompt-injection protection
+- Controlled model access
+- Audit-friendly request flows
+
+Production Mapping:
+- Add authentication & authorization
+- Persist audit logs for compliance
+- Enforce policy-based routing
+
+This project is intentionally designed to demonstrate **system-level AI engineering**:
+not model tuning, but **decision-making, safety, reliability, and production readiness**.
+
+It reflects how modern AI systems are built and operated in real enterprise environments.
+
+
