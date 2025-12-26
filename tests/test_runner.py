@@ -1,181 +1,201 @@
 """
-Updated test runner compatible with the orchestrator-based architecture.
+End-to-end LLM system runner for the Fraud Intelligence platform.
+
+Purpose:
+- Validate orchestrator routing (RAG vs Analytics)
+- Smoke-test real LLM execution paths
+- Validate response structure (not correctness)
+
+IMPORTANT:
+- Marked with @pytest.mark.llm
+- Skipped automatically in CI
 """
 
 import os
 import pytest
+import traceback
+
+from src.orchestrator import run_query
+
+
+# ============================================================
+# CI GUARD
+# ============================================================
 
 if os.getenv("CI") == "true":
-    pytest.skip("Skipping LLM tests in CI", allow_module_level=True)
+    pytest.skip("Skipping LLM integration tests in CI", allow_module_level=True)
 
 
-import traceback
-from pprint import pprint
+# ============================================================
+# TEST CASES
+# ============================================================
 
-
-from src.orchestrator import run_query  
-
-TESTS = [
+TEST_CASES = [
     {
-        "q": "How does the daily or monthly fraud rate fluctuate over the two-year period?",
-        "expect_intent": "analytics",
+        "query": "How does the daily or monthly fraud rate fluctuate over the two-year period?",
+        "expected_intent": "analytics",
     },
     {
-        "q": "Which merchants or merchant categories exhibit the highest incidence of fraudulent transactions?",
-        "expect_intent": "rag",
+        "query": "Which merchants or merchant categories exhibit the highest incidence of fraudulent transactions?",
+        "expected_intent": "rag",
     },
     {
-        "q": "What are the primary methods by which credit card fraud is committed?",
-        "expect_intent": "rag",
+        "query": "What are the primary methods by which credit card fraud is committed?",
+        "expected_intent": "rag",
     },
     {
-        "q": "What are the core components of an effective fraud detection system, according to the authors?",
-        "expect_intent": "rag",
+        "query": "What are the core components of an effective fraud detection system, according to the authors?",
+        "expected_intent": "rag",
     },
     {
-        "q": "How much higher are fraud rates when the transaction counterpart is located outside the EEA?",
-        "expect_intent": "rag",
+        "query": "How much higher are fraud rates when the transaction counterpart is located outside the EEA?",
+        "expected_intent": "rag",
     },
     {
-        "q": "What share of total card fraud value in H1 2023 was due to cross-border transactions?",
-        "expect_intent": "rag",
+        "query": "What share of total card fraud value in H1 2023 was due to cross-border transactions?",
+        "expected_intent": "rag",
     },
 ]
 
-FAILURES = []
 
+# ============================================================
+# RESULT HELPERS
+# ============================================================
 
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
-
-def extract_payload(raw_out):
+def extract_result_payload(raw_output):
     """
-    Your orchestrator returns:
+    Orchestrator returns:
     {
         "query": ...,
         "intent": ...,
-        "result": {...},   <-- ACTUAL payload is here
-        "error": None or str
+        "result": {...},
+        "error": None | str
     }
     """
-    if not raw_out:
+    if not raw_output:
         return None
 
-    if isinstance(raw_out, dict) and raw_out.get("error"):
-        return {"type": "error", "error": raw_out["error"], "details": None}
+    if raw_output.get("error"):
+        return {
+            "type": "error",
+            "error": raw_output.get("error"),
+            "details": None,
+        }
 
-    return raw_out.get("result")
+    return raw_output.get("result")
 
 
-def infer_intent_from_result(result):
+def infer_intent_from_payload(payload):
     """
-    Decide between analytics/rag based on structure.
+    Infer intent from response structure.
+    This avoids relying on internal intent flags.
     """
-    if not result:
+    if not isinstance(payload, dict):
         return "unknown"
 
-    # Analytics
-    if (
-        isinstance(result, dict)
-        and "answer" in result
-        and "chart_data" in result
-        and "confidence" in result
-    ):
+    # Analytics response
+    if "answer" in payload and "chart_data" in payload:
         return "analytics"
 
-    # RAG
-    if isinstance(result, dict) and "answer" in result and "citations" in result:
+    # RAG response
+    if "answer" in payload and "citations" in payload:
         return "rag"
 
     return "unknown"
 
 
-def check_result(tcase, raw_out):
-    q = tcase["q"]
-    expect = tcase["expect_intent"]
+def validate_result(test_case, raw_output):
+    query = test_case["query"]
+    expected = test_case["expected_intent"]
 
-    print("\n----")
-    print("Query:", q)
+    print("\n----------------------------------------")
+    print("Query:", query)
 
-    result = extract_payload(raw_out)
+    payload = extract_result_payload(raw_output)
 
-    if result is None:
-        print("  [FAIL] No result payload returned.")
+    if payload is None:
+        print("[FAIL] No result payload returned")
         return False
 
-    if isinstance(result, dict) and result.get("type") == "error":
-        print("  [FAIL] ErrorResponse:", result.get("error"))
+    if payload.get("type") == "error":
+        print("[FAIL] Error returned:", payload.get("error"))
         return False
 
-    inferred = infer_intent_from_result(result)
-    print(f"  Inferred intent: {inferred} | Expected: {expect}")
+    inferred = infer_intent_from_payload(payload)
+    print(f"Inferred intent: {inferred} | Expected: {expected}")
 
-    if inferred != expect:
-        print("  [WARN] Intent mismatch — may still be acceptable.")
+    if inferred != expected:
+        print("[WARN] Intent mismatch — structure still valid")
 
+    # -----------------------
     # STRUCTURE VALIDATION
-    if expect == "analytics":
-        if not isinstance(result, dict) or "answer" not in result:
-            print("  [FAIL] Analytics response missing 'answer'")
+    # -----------------------
+
+    if expected == "analytics":
+        if "answer" not in payload:
+            print("[FAIL] Analytics response missing 'answer'")
             return False
+
         print("[PASS] Analytics summary:")
-        print("  ", result["answer"])
+        print(payload["answer"])
         return True
 
     # RAG expected
-    if not isinstance(result, dict) or "answer" not in result:
-        print("  [FAIL] RAG response missing 'answer'")
+    if "answer" not in payload:
+        print("[FAIL] RAG response missing 'answer'")
         return False
 
-    answer_str = result["answer"] or ""
-    if not answer_str:
-        print("  [FAIL] RAG returned an empty answer.")
+    answer = payload.get("answer") or ""
+    if not answer.strip():
+        print("[FAIL] Empty RAG answer")
         return False
 
-    print("[PASS] RAG returned answer:")
-    preview = answer_str[:300] + ("…" if len(answer_str) > 300 else "")
-    print("  ", preview)
+    preview = answer[:300] + ("…" if len(answer) > 300 else "")
+    print("[PASS] RAG answer preview:")
+    print(preview)
+
     return True
 
 
-# ------------------------------------------------------------
-# Main Test Logic
-# ------------------------------------------------------------
+# ============================================================
+# MAIN RUNNER
+# ============================================================
 
-def main():
-    ok = True
+def run_all_tests():
+    failures = []
 
-    for t in TESTS:
+    for case in TEST_CASES:
         try:
-            raw_out = run_query(t["q"])
-            success = check_result(t, raw_out)
-            if not success:
-                FAILURES.append((t["q"], raw_out))
-                ok = False
-        except Exception:
-            print("Exception during test:")
-            traceback.print_exc()
-            FAILURES.append((t["q"], "exception"))
-            ok = False
+            output = run_query(case["query"])
+            success = validate_result(case, output)
 
-    print("\n==== Test Summary ====")
-    if FAILURES:
-        print(f"FAILED {len(FAILURES)} tests.")
-        for f in FAILURES:
-            print(" -", f[0])
+            if not success:
+                failures.append((case["query"], output))
+
+        except Exception:
+            print("[EXCEPTION] During test execution")
+            traceback.print_exc()
+            failures.append((case["query"], "exception"))
+
+    print("\n========== TEST SUMMARY ==========")
+    if failures:
+        print(f"FAILED {len(failures)} test(s):")
+        for q, _ in failures:
+            print(" -", q)
         return False
 
-    print("ALL TESTS PASSED")
+    print("ALL LLM TESTS PASSED")
     return True
 
 
-# def test_run_all_queries():
-#     assert main() is True
+# ============================================================
+# PYTEST ENTRYPOINT
+# ============================================================
+
 @pytest.mark.llm
 def test_run_all_queries():
-    assert main() is True
+    assert run_all_tests() is True
 
 
 if __name__ == "__main__":
-    main()
+    run_all_tests()

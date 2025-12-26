@@ -1,31 +1,49 @@
-# # src/rag/insight_layer.py
+# src/rag/insight_layer.py
+"""
+Insight generation layer for fraud-focused RAG.
 
-# """
-# Insight layer for fraud-focused RAG.
+Purpose:
+- Generate high-level analytical insights
+- STRICTLY grounded in the same RAG context
+- Never introduce new facts
+- Never contradict the main answer
+- Never guess beyond retrieved evidence
+"""
 
-# Generates analytic, high-level insights STRICTLY based on the same RAG context.
-# Never introduces new facts.
-# Never contradicts answer.
-# Never guesses.
-# """
-
+from typing import Optional
 
 from src.llm.llm_client import llm
 
-def generate_insight(answer: str, context_text: str, user_lang: str) -> str:
-    if not answer or "not provide enough information" in answer.lower():
+
+def generate_insight(
+    answer: str,
+    context_text: str,
+    user_lang: str,
+) -> Optional[str]:
+    """
+    Generate a concise analytical insight derived from the RAG answer
+    and its supporting context.
+
+    Returns None if:
+    - The answer is empty
+    - The system already indicates insufficient information
+    """
+    if not answer:
         return None
 
-    lang_instruction = (
+    if "not provide enough information" in answer.lower():
+        return None
+
+    language_instruction = (
         "Write the insight in Indonesian."
         if user_lang == "id"
         else "Write the insight in English."
     )
 
     prompt = f"""
-Generate a concise analytical insight based on this answer and supporting context.
+Generate a concise analytical insight based strictly on the answer and context below.
 
-{lang_instruction}
+{language_instruction}
 
 ANSWER:
 {answer}
@@ -33,10 +51,12 @@ ANSWER:
 CONTEXT:
 {context_text}
 
-Your insight must:
- - capture the implication of the findings,
- - be 3-5 sentences,
- - be factual and grounded.
+Rules:
+- Do NOT introduce new facts
+- Do NOT contradict the answer
+- Do NOT speculate beyond the context
+- Focus on implications, not restatement
+- 3-5 sentences only
 """.strip()
 
     return llm.run(prompt, temperature=0.2)

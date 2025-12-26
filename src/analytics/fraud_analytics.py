@@ -1,4 +1,17 @@
 # src/analytics/fraud_analytics.py
+"""
+Fraud analytics engine.
+
+This module translates natural-language fraud questions into:
+- deterministic SQL queries (with strict guardrails),
+- structured analytics results,
+- explainable summaries and chart-friendly outputs.
+
+Design principles:
+- Safety first (SELECT-only SQL, bounded rows)
+- Deterministic analytics before LLM refinement
+- Graceful fallback paths
+"""
 
 import os
 import re
@@ -16,109 +29,112 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # =============================================================================
-# CONFIG
+# CONFIGURATION
 # =============================================================================
 
 USE_LLM_SQL = os.getenv("ANALYTICS_USE_LLM_SQL", "1") != "0"
 USE_LLM_SUMMARY = os.getenv("ANALYTICS_USE_LLM_SUMMARY", "0") == "1"
 MAX_ROWS_RETURN = int(os.getenv("ANALYTICS_MAX_ROWS", "1000"))
 
-
 # =============================================================================
-# SMALL HELPERS
+# SQL & TEXT SANITIZATION HELPERS
 # =============================================================================
 
-def _strip_markdown(sql: str) -> str:
-    """
-    Remove ```sql fences etc from LLM output.
-    """
+def strip_markdown(sql: str) -> str:
+    """Remove markdown fences from LLM-generated SQL."""
     return sql.replace("```sql", "").replace("```", "").strip()
 
 
-def _is_safe_select(sql: str) -> bool:
+def normalize_sql(sql: str) -> str:
+    """Normalize whitespace for logging and execution."""
+    return re.sub(r"\s+", " ", sql).strip()
+
+
+def is_safe_select(sql: str) -> bool:
     """
-    Enforce SELECT-only, prevent DDL/DML.
+    Enforce SELECT-only SQL.
+    Blocks DDL/DML to prevent destructive queries.
     """
     s = sql.strip().lower()
     if not s.startswith("select"):
         return False
-    forbidden = ["insert ", "delete ", "update ", "drop ", "alter ", "create "]
+
+    forbidden = ("insert ", "delete ", "update ", "drop ", "alter ", "create ")
     return not any(tok in s for tok in forbidden)
 
 
-def _clean_sql_whitespace(sql: str) -> str:
-    return re.sub(r"\s+", " ", sql).strip()
-
-
 def strip_html(text: str) -> str:
+    """Remove HTML tags from text output."""
     if not isinstance(text, str):
         return text
     return re.sub(r"<[^>]+>", "", text)
 
 # =============================================================================
-# ANALYTICS INTENT CLASSIFICATION 
+# ANALYTICS INTENT CLASSIFICATION
 # =============================================================================
 
 def classify_analytics_intent(nl_query: str) -> str:
     """
-    Lightweight classifier for analytics questions.
+    Lightweight intent classifier for fraud analytics queries.
 
-    Returns one of:
-      - "timeseries"   → fraud rate over time
-      - "merchant_rank"
-      - "category_rank"
-      - "generic"
+    Returns:
+      - timeseries
+      - merchant_rank
+      - category_rank
+      - generic
     """
     q = nl_query.lower()
 
-    if any(k in q for k in ["merchant", "merchants", "toko"]):
+    if any(k in q for k in ("merchant", "merchants", "toko")):
         return "merchant_rank"
 
-    if any(k in q for k in ["category", "categories", "kategori"]):
+    if any(k in q for k in ("category", "categories", "kategori")):
         return "category_rank"
 
-    if any(k in q for k in [
+    if any(k in q for k in (
         "daily", "harian", "per day",
         "monthly", "bulanan", "per month",
-        "trend", "over time", "two year", "two years", "fluctuate", "fluctuation"
-    ]):
+        "trend", "over time",
+        "two year", "two years",
+        "fluctuate", "fluctuation",
+    )):
         return "timeseries"
 
     return "generic"
 
-
 # =============================================================================
-# FALLBACK SQL BUILDERS 
+# FALLBACK SQL BUILDERS (DETERMINISTIC & SAFE)
 # =============================================================================
 
-def _extract_years_from_query(nl_query: str) -> List[int]:
+def extract_years_from_query(nl_query: str) -> List[int]:
     years = re.findall(r"\b(20\d{2})\b", nl_query.lower())
-    uniques = sorted({int(y) for y in years})
-    return uniques
+    return sorted({int(y) for y in years})
 
 
 def fallback_time_series_sql(nl_query: str, period: str = "month") -> str:
     """
-    Safe, opinionated SQL template for fraud rate time series.
-
-    period: "day" or "month"
+    Opinionated SQL template for fraud-rate time series.
     """
-    years = _extract_years_from_query(nl_query)
+    years = extract_years_from_query(nl_query)
     year_clause = ""
-    if years:
-        year_list = ",".join(str(y) for y in years)
-        year_clause = f"WHERE EXTRACT(YEAR FROM trans_date_trans_time) IN ({year_list})"
 
-    if period == "day":
-        date_expr = "DATE(trans_date_trans_time)"
-    else:
-        date_expr = "DATE_TRUNC('month', trans_date_trans_time)"
+    if years:
+        year_list = ",".join(map(str, years))
+        year_clause = (
+            f"WHERE EXTRACT(YEAR FROM trans_date_trans_time) IN ({year_list})"
+        )
+
+    date_expr = (
+        "DATE(trans_date_trans_time)"
+        if period == "day"
+        else "DATE_TRUNC('month', trans_date_trans_time)"
+    )
 
     return f"""
         SELECT
             {date_expr} AS date,
             COUNT(*) FILTER (WHERE isfraud = TRUE)::float /
-            NULLIF(COUNT(*),0)::float AS fraud_rate
+            NULLIF(COUNT(*), 0)::float AS fraud_rate
         FROM fraud_transactions
         {year_clause}
         GROUP BY date
@@ -132,7 +148,8 @@ def fallback_count_by_category_sql() -> str:
             category,
             COUNT(*) FILTER (WHERE isfraud = TRUE) AS fraud_count,
             COUNT(*) AS total_count,
-            COUNT(*) FILTER (WHERE isfraud = TRUE)::float / NULLIF(COUNT(*), 0)::float AS fraud_rate
+            COUNT(*) FILTER (WHERE isfraud = TRUE)::float /
+            NULLIF(COUNT(*), 0)::float AS fraud_rate
         FROM fraud_transactions
         GROUP BY category
         ORDER BY fraud_count DESC
@@ -146,7 +163,8 @@ def fallback_merchant_fraud_sql() -> str:
             merchant,
             COUNT(*) FILTER (WHERE isfraud = TRUE) AS fraud_count,
             COUNT(*) AS total_count,
-            COUNT(*) FILTER (WHERE isfraud = TRUE)::float / NULLIF(COUNT(*), 0)::float AS fraud_rate
+            COUNT(*) FILTER (WHERE isfraud = TRUE)::float /
+            NULLIF(COUNT(*), 0)::float AS fraud_rate
         FROM fraud_transactions
         GROUP BY merchant
         HAVING COUNT(*) FILTER (WHERE isfraud = TRUE) > 0
@@ -154,350 +172,309 @@ def fallback_merchant_fraud_sql() -> str:
         LIMIT 20;
     """
 
-
 # =============================================================================
-# NL → SQL 
+# NL → SQL TRANSLATION
 # =============================================================================
 
 def nl_to_sql(nl_query: str, intent: str) -> str:
     """
-    NL → SQL with:
-      - hard overrides for ranking questions
-      - controlled time-series patterns
-      - safe LLM-only fallback for generic queries
+    Translate natural language to SQL using:
+    - strict deterministic templates when possible
+    - LLM only for generic queries
     """
     q = nl_query.lower()
 
-    # Hard override for merchant ranking
     if intent == "merchant_rank":
-        logger.info("[analytics] Using strict merchant ranking SQL")
+        logger.info("[analytics] Using merchant ranking template")
         return fallback_merchant_fraud_sql()
 
-    # Hard override for category ranking
     if intent == "category_rank":
-        logger.info("[analytics] Using strict category ranking SQL")
+        logger.info("[analytics] Using category ranking template")
         return fallback_count_by_category_sql()
 
-    # Time-series: fraud rate over time
     if intent == "timeseries":
-        logger.info("[analytics] Using strict timeseries fraud_rate SQL")
-        # decide daily vs monthly
-        period = "day" if any(k in q for k in ["daily", "harian", "per day"]) else "month"
-        return fallback_time_series_sql(nl_query, period=period)
+        logger.info("[analytics] Using time-series template")
+        period = "day" if any(k in q for k in ("daily", "harian", "per day")) else "month"
+        return fallback_time_series_sql(nl_query, period)
 
-    # Generic: use LLM to map question → SQL with strict schema
     if not USE_LLM_SQL:
-        raise ValueError("LLM SQL generation disabled and no strict template available.")
+        raise ValueError("LLM-based SQL generation is disabled.")
 
     prompt = NL_TO_SQL_PROMPT.format(q=nl_query)
     raw = llm.run(prompt, temperature=0.0)
-    if not isinstance(raw, str):
-        raw = str(raw)
+    sql = normalize_sql(strip_markdown(str(raw)))
 
-    sql = _strip_markdown(raw)
-    sql = _clean_sql_whitespace(sql)
-
-    if not _is_safe_select(sql):
-        raise ValueError(f"Unsafe or invalid SQL generated: {sql}")
+    if not is_safe_select(sql):
+        raise ValueError(f"Unsafe SQL generated: {sql}")
 
     return sql
 
-
 # =============================================================================
-# SQL EXECUTION LAYER
+# SQL EXECUTION
 # =============================================================================
 
 def execute_sql(sql: str) -> pd.DataFrame:
-    """
-    Execute SQL against Supabase and return DataFrame.
-    """
-    sql_clean = _clean_sql_whitespace(sql)
-    logger.info(f"[analytics] EXECUTING SQL:\n{sql_clean}")
+    """Execute SQL via Supabase and return a bounded DataFrame."""
+    sql_clean = normalize_sql(sql)
+    logger.info(f"[analytics] Executing SQL:\n{sql_clean}")
 
     rows = DB.sql(sql_clean)
     if not rows:
-        logger.info("[analytics] SQL returned 0 rows.")
+        logger.info("[analytics] Query returned no rows.")
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
+
     if len(df) > MAX_ROWS_RETURN:
         df = df.head(MAX_ROWS_RETURN)
-        logger.info(f"[analytics] Truncated rows to {MAX_ROWS_RETURN} for safety.")
+        logger.info(f"[analytics] Truncated result to {MAX_ROWS_RETURN} rows.")
 
-    logger.info(f"[analytics] SQL returned {len(df)} rows | columns={list(df.columns)}")
+    logger.info(
+        f"[analytics] Query returned {len(df)} rows | columns={list(df.columns)}"
+    )
     return df
 
-
 # =============================================================================
-# CHART BUILDER
+# CHART TRANSFORMATION
 # =============================================================================
 
-def to_chart_data(df: pd.DataFrame) -> Optional[list]:
+def to_chart_data(df: pd.DataFrame) -> Optional[List[Dict[str, float]]]:
     """
-    Convert a DataFrame into simple chart format understood by UI:
-      [{ "label": ..., "value": ... }, ...]
+    Convert DataFrame into UI-friendly chart format.
     """
-    chart = []
+    chart: List[Dict[str, float]] = []
 
-    # Time-series: date + fraud_rate or value
-    if "date" in df.columns and ("fraud_rate" in df.columns or "value" in df.columns):
-        val = "fraud_rate" if "fraud_rate" in df.columns else "value"
+    if "date" in df.columns and any(c in df.columns for c in ("fraud_rate", "value")):
+        value_col = "fraud_rate" if "fraud_rate" in df.columns else "value"
         for _, r in df.iterrows():
-            chart.append({"label": str(r["date"]), "value": float(r[val])})
+            chart.append({"label": str(r["date"]), "value": float(r[value_col])})
         return chart
 
-    # Category / Merchant ranking
-    if ("category" in df.columns or "merchant" in df.columns) and "fraud_count" in df.columns:
-        label_col = "category" if "category" in df.columns else "merchant"
+    if any(c in df.columns for c in ("merchant", "category")) and "fraud_count" in df.columns:
+        label_col = "merchant" if "merchant" in df.columns else "category"
         for _, r in df.iterrows():
             chart.append({"label": str(r[label_col]), "value": float(r["fraud_count"])})
         return chart
 
     return None
 
-
 # =============================================================================
-# ANALYTICS SUMMARY (PYTHONIC, DETERMINISTIC)
+# ANALYTICS SUMMARIZATION (DETERMINISTIC)
 # =============================================================================
 
 def summarize_timeseries(df: pd.DataFrame, lang: str) -> Tuple[str, float]:
     """
-    Summarize fraud_rate timeseries: min, max, avg, volatility, trend.
-    Returns (summary, confidence).
+    Generate a deterministic summary for fraud-rate time series.
     """
-    if "fraud_rate" not in df.columns or "date" not in df.columns:
-        msg = "Data does not contain fraud rate over time." if lang == "en" else \
-              "Data tidak mengandung informasi tingkat fraud dari waktu ke waktu."
+    if not {"date", "fraud_rate"}.issubset(df.columns):
+        msg = (
+            "Data does not contain fraud rate over time."
+            if lang == "en"
+            else "Data tidak mengandung informasi tingkat fraud dari waktu ke waktu."
+        )
         return msg, 0.2
 
     if len(df) < 2:
-        msg = "Data is insufficient for time-series analysis." if lang == "en" else \
-              "Data tidak memadai untuk analisis time-series."
+        msg = (
+            "Data is insufficient for time-series analysis."
+            if lang == "en"
+            else "Data tidak memadai untuk analisis time-series."
+        )
         return msg, 0.2
 
     fr = df["fraud_rate"].astype(float)
+
     if fr.nunique() <= 1:
-        msg = "Fraud rate appears almost constant; insufficient fluctuation for analysis." if lang == "en" else \
-              "Tingkat fraud tampak hampir konstan; tidak cukup fluktuasi untuk dianalisis."
+        msg = (
+            "Fraud rate appears almost constant; insufficient fluctuation for analysis."
+            if lang == "en"
+            else "Tingkat fraud tampak hampir konstan; tidak cukup fluktuasi."
+        )
         return msg, 0.4
 
-    lo = fr.min()
-    hi = fr.max()
-    avg = fr.mean()
+    lo, hi, avg = fr.min(), fr.max(), fr.mean()
     std = fr.std()
-    vol = std / (avg + 1e-8)
+    volatility = std / (avg + 1e-8)
 
     x = np.arange(len(df))
-    trend_coeff = np.polyfit(x, fr.values, 1)[0]
-    if trend_coeff > 0.0005:
+    trend = np.polyfit(x, fr.values, 1)[0]
+
+    if trend > 0.0005:
         trend_desc = "increasing" if lang == "en" else "meningkat"
-    elif trend_coeff < -0.0005:
+    elif trend < -0.0005:
         trend_desc = "decreasing" if lang == "en" else "menurun"
     else:
         trend_desc = "roughly stable" if lang == "en" else "cenderung stabil"
 
-    peak_idx = fr.idxmax()
-    low_idx = fr.idxmin()
-    peak_date = df.loc[peak_idx, "date"]
-    low_date = df.loc[low_idx, "date"]
+    peak_date = df.loc[fr.idxmax(), "date"]
+    low_date = df.loc[fr.idxmin(), "date"]
 
     if lang.startswith("id"):
         summary = (
-            f"Tingkat fraud berfluktuasi sepanjang periode pengamatan dengan rentang "
-            f"{lo:.4f}-{hi:.4f} dan rata-rata sekitar {avg:.4f}. "
-            f"Secara umum tren terlihat {trend_desc}. "
-            f"Nilai tertinggi terjadi pada {peak_date} sebesar {hi:.4f}, "
-            f"sementara nilai terendah terjadi pada {low_date} sebesar {lo:.4f}. "
-            f"Volatilitas relatif sekitar {vol:.2f}, berdasarkan {len(df)} titik waktu."
+            f"Tingkat fraud berfluktuasi antara {lo:.4f}-{hi:.4f} "
+            f"dengan rata-rata {avg:.4f}. Tren keseluruhan {trend_desc}. "
+            f"Puncak terjadi pada {peak_date}, terendah pada {low_date}. "
+            f"Volatilitas relatif sekitar {volatility:.2f}."
         )
     else:
         summary = (
-            f"Fraud rates fluctuate over the observed period with a range of "
-            f"{lo:.4f}-{hi:.4f} and an average of about {avg:.4f}. "
-            f"The overall trend appears {trend_desc}. "
-            f"The highest rate occurs on {peak_date} at {hi:.4f}, "
-            f"while the lowest occurs on {low_date} at {lo:.4f}. "
-            f"Relative volatility is approximately {vol:.2f}, based on {len(df)} time points."
+            f"Fraud rates fluctuate between {lo:.4f}-{hi:.4f} "
+            f"with an average of {avg:.4f}. The overall trend is {trend_desc}. "
+            f"The peak occurs on {peak_date}, with the lowest on {low_date}. "
+            f"Relative volatility is approximately {volatility:.2f}."
         )
 
-    # Confidence: more points + non-trivial variance -> higher
-    conf = 0.5 + min(0.4, np.log10(len(df) + 1) * 0.1 + min(0.3, vol))
-    conf = float(max(0.0, min(1.0, conf)))
-
-    return summary, conf
+    confidence = 0.5 + min(0.4, np.log10(len(df) + 1) * 0.1 + min(0.3, volatility))
+    return summary, float(min(1.0, max(0.0, confidence)))
 
 
 def summarize_ranking(df: pd.DataFrame, lang: str) -> Tuple[str, float]:
     """
-    Summarize merchant/category ranking table.
-    Returns (summary, confidence).
+    Summarize merchant or category fraud rankings.
     """
-    if ("merchant" not in df.columns and "category" not in df.columns) or "fraud_count" not in df.columns:
-        msg = "Data does not contain merchant/category fraud breakdown." if lang == "en" else \
-              "Data tidak mengandung rincian fraud per merchant/kategori."
+    label_col = "merchant" if "merchant" in df.columns else "category"
+
+    if label_col not in df.columns or "fraud_count" not in df.columns:
+        msg = (
+            "Data does not contain merchant/category fraud breakdown."
+            if lang == "en"
+            else "Data tidak mengandung rincian fraud per merchant/kategori."
+        )
         return msg, 0.3
 
-    label_col = "merchant" if "merchant" in df.columns else "category"
     df_sorted = df.sort_values("fraud_count", ascending=False)
-
     top = df_sorted.iloc[0]
-    top_name = str(top[label_col])
-    top_count = int(top["fraud_count"])
-    top_total = int(top.get("total_count", top["fraud_count"]))
-    top_rate = float(top.get("fraud_rate", top["fraud_count"] / max(1, top_total)))
 
-    # top5 = df_sorted.head(5)
-    total_fraud = int(df_sorted["fraud_count"].sum())
+    top_rate = float(
+        top.get("fraud_rate", top["fraud_count"] / max(1, top.get("total_count", 1)))
+    )
 
     if lang.startswith("id"):
         summary = (
-            f"Entitas dengan insiden fraud tertinggi adalah {top_name} "
-            f"dengan {top_count} kasus fraud dari sekitar {top_total} transaksi "
-            f"(fraud rate ~{top_rate:.2%}). "
-            f"Secara keseluruhan, terdapat {total_fraud} kasus fraud "
-            f"yang tersebar pada {len(df_sorted)} merchant/kategori. "
-            f"Kelompok 5 besar memberikan kontribusi signifikan terhadap total insiden."
+            f"{top[label_col]} memiliki insiden fraud tertinggi "
+            f"dengan {int(top['fraud_count'])} kasus "
+            f"(fraud rate ~{top_rate:.2%})."
         )
     else:
         summary = (
-            f"The entity with the highest fraud incidence is {top_name}, "
-            f"with {top_count} fraud cases out of roughly {top_total} transactions "
-            f"(fraud rate ~{top_rate:.2%}). "
-            f"In total, there are {total_fraud} fraud cases across "
-            f"{len(df_sorted)} merchants/categories, "
-            f"with the top-5 contributing a significant portion of overall fraud volume."
+            f"{top[label_col]} has the highest fraud incidence "
+            f"with {int(top['fraud_count'])} cases "
+            f"(fraud rate ~{top_rate:.2%})."
         )
 
-    conf = 0.6 + min(0.3, np.log10(len(df_sorted) + 1) * 0.1)
-    conf = float(max(0.0, min(1.0, conf)))
-    return summary, conf
+    confidence = 0.6 + min(0.3, np.log10(len(df_sorted) + 1) * 0.1)
+    return summary, float(min(1.0, max(0.0, confidence)))
 
 
 def summarize_generic(df: pd.DataFrame, lang: str) -> Tuple[str, float]:
-    """
-    Generic catch-all summary when we don't recognize a special structure.
-    """
+    """Fallback summary for unstructured results."""
     if df.empty:
-        msg = "No data available to answer the question." if lang == "en" else \
-              "Tidak ada data yang tersedia untuk menjawab pertanyaan."
+        msg = (
+            "No data available to answer the question."
+            if lang == "en"
+            else "Tidak ada data untuk menjawab pertanyaan."
+        )
         return msg, 0.0
 
-    if lang.startswith("id"):
-        summary = f"Analisis berhasil memproses {len(df)} baris data dan {len(df.columns)} kolom."
-    else:
-        summary = f"Analysis successfully processed {len(df)} rows and {len(df.columns)} columns."
-
-    conf = 0.5
-    return summary, conf
-
+    summary = (
+        f"Analysis processed {len(df)} rows and {len(df.columns)} columns."
+        if lang == "en"
+        else f"Analisis memproses {len(df)} baris dan {len(df.columns)} kolom."
+    )
+    return summary, 0.5
 
 # =============================================================================
-# OPTIONAL LLM-REFINED SUMMARY
+# OPTIONAL LLM REFINEMENT
 # =============================================================================
 
 def refine_summary_with_llm(summary: str, df: pd.DataFrame, lang: str) -> str:
-    """
-    Use ANALYTICS_SYSTEM_PROMPT to polish the Python-generated summary.
-    Only run if USE_LLM_SUMMARY=True.
-    """
+    """Light LLM refinement layer (optional, non-authoritative)."""
     if not USE_LLM_SUMMARY:
         return summary
 
-    # take small sample of data for context
     sample = df.head(5).to_dict(orient="records")
-
-    prompt = ANALYTICS_SYSTEM_PROMPT + f"""
+    prompt = f"""{ANALYTICS_SYSTEM_PROMPT}
 
 Language: {"Indonesian" if lang.startswith("id") else "English"}
 
-Here is the initial summary:
+Initial summary:
 {summary}
 
-Here is a small sample of the underlying data (JSON):
+Sample data (JSON):
 {sample}
 
-Refine the summary to be slightly clearer and more user-friendly,
-but do NOT change any numbers or introduce new facts.
+Refine wording only. Do not change numbers or facts.
 """
 
     try:
         resp = llm.run(prompt, temperature=0.1)
-        if isinstance(resp, str) and resp.strip():
-            return resp.strip()
-        return summary
+        return resp.strip() if isinstance(resp, str) and resp.strip() else summary
     except Exception as e:
-        logger.warning(f"[analytics] LLM summary refinement failed: {e}")
+        logger.warning(f"[analytics] LLM refinement failed: {e}")
         return summary
-
 
 # =============================================================================
-# MAIN ANALYTICS ENGINE
+# MAIN ENTRYPOINT
 # =============================================================================
 
 def run_analytics(nl_query: str, lang: str = "en") -> Dict[str, Any]:
     """
-    Main entrypoint for fraud analytics.
-
-    Steps:
-      1) Domain guardrail (must be fraud-related numeric question)
-      2) Classify analytics intent (timeseries / ranking / generic)
-      3) NL → SQL 
-      4) Execute SQL
-      5) Validate shape
-      6) Build summary + chart
-      7) Optionally refine summary with LLM
+    Main fraud analytics pipeline.
     """
-
     try:
         q_lower = nl_query.lower()
 
-        # 1) Domain guardrail
-        fraud_keywords = [
-            "fraud", "fraud rate", "penipuan", "nilai fraud",
-            "isfraud", "transaksi", "harian", "bulanan",
-            "daily", "monthly", "over time", "trend", "fluctuate", "fluctuation"
-        ]
+        fraud_keywords = (
+            "fraud", "penipuan", "isfraud", "transaksi",
+            "daily", "monthly", "harian", "bulanan",
+            "trend", "over time", "fluctuate",
+        )
+
         if not any(k in q_lower for k in fraud_keywords):
             msg = (
-                "Sorry, I can only run analytics on fraud-related transaction data."
-                if lang == "en" else
-                "Maaf, saya hanya dapat menjalankan analitik pada data transaksi terkait fraud."
+                "Sorry, I can only analyze fraud-related transaction data."
+                if lang == "en"
+                else "Maaf, saya hanya dapat menganalisis data transaksi terkait fraud."
             )
-            return AnalyticsResponse(answer=msg, data_points=None, chart_data=None, confidence=0.0).model_dump()
+            return AnalyticsResponse(
+                answer=msg,
+                data_points=None,
+                chart_data=None,
+                confidence=0.0,
+            ).model_dump()
 
-        # 2) Intent classification within analytics
         intent = classify_analytics_intent(nl_query)
         logger.info(f"[analytics] intent={intent} | query={nl_query!r}")
 
-        # 3) NL → SQL
         df = pd.DataFrame()
         try:
-            sql = nl_to_sql(nl_query, intent=intent)
+            sql = nl_to_sql(nl_query, intent)
             df = execute_sql(sql)
         except Exception as e:
-            logger.warning(f"[analytics] NL->SQL generation failed: {e}")
+            logger.warning(f"[analytics] NL→SQL failed: {e}")
 
-        # 4) Fallback templates if LLM SQL failed or returned empty
         if df.empty:
-            logger.info("[analytics] Trying fallback SQL templates due to empty result.")
+            logger.info("[analytics] Using fallback SQL.")
             if intent == "timeseries":
-                # daily vs monthly already handled in fallback_time_series_sql
-                sql = fallback_time_series_sql(nl_query)
-                df = execute_sql(sql)
+                df = execute_sql(fallback_time_series_sql(nl_query))
             elif intent == "category_rank":
-                sql = fallback_count_by_category_sql()
-                df = execute_sql(sql)
+                df = execute_sql(fallback_count_by_category_sql())
             elif intent == "merchant_rank":
-                sql = fallback_merchant_fraud_sql()
-                df = execute_sql(sql)
+                df = execute_sql(fallback_merchant_fraud_sql())
 
-        # 5) No data → graceful message
         if df.empty:
-            msg = "Insufficient data to answer the question." if lang == "en" else \
-                  "Data tidak mencukupi untuk menjawab pertanyaan tersebut."
-            return AnalyticsResponse(answer=msg, data_points=None, chart_data=None, confidence=0.0).model_dump()
+            msg = (
+                "Insufficient data to answer the question."
+                if lang == "en"
+                else "Data tidak mencukupi untuk menjawab pertanyaan."
+            )
+            return AnalyticsResponse(
+                answer=msg,
+                data_points=None,
+                chart_data=None,
+                confidence=0.0,
+            ).model_dump()
 
-        # 6) Validate shape vs intent & build summary
         if intent == "timeseries":
             summary, conf = summarize_timeseries(df, lang)
         elif intent in {"merchant_rank", "category_rank"}:
@@ -505,26 +482,19 @@ def run_analytics(nl_query: str, lang: str = "en") -> Dict[str, Any]:
         else:
             summary, conf = summarize_generic(df, lang)
 
-        # 7) Chart data
         chart = to_chart_data(df)
+        summary = refine_summary_with_llm(summary, df, lang)
 
-        # 8) Optional LLM refinement of summary
-        summary_refined = refine_summary_with_llm(summary, df, lang)
-
-        # 9) Build final response
-        resp = AnalyticsResponse(
-            answer=strip_html(summary_refined),
+        return AnalyticsResponse(
+            answer=strip_html(summary),
             data_points=df.to_dict(orient="records"),
             chart_data=chart,
             confidence=conf,
         ).model_dump()
 
-        logger.info(f"[analytics] Final analytics payload constructed with confidence={conf:.3f}")
-        return resp
-
     except Exception as e:
-        logger.error(f"[analytics] Analytics pipeline failed: {e}", exc_info=True)
+        logger.error("[analytics] Pipeline failed", exc_info=True)
         return ErrorResponse(
             error="Analytics failed.",
-            details=str(e)
+            details=str(e),
         ).model_dump()

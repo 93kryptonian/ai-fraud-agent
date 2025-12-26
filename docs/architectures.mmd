@@ -1,0 +1,51 @@
+flowchart LR
+    %% =========================
+    %% User Entry
+    %% =========================
+    User[User / Analyst] --> UI[API / Client]
+
+    %% =========================
+    %% Guardrails & Preprocessing
+    %% =========================
+    UI --> Guardrails[Guardrail Agent<br/>(validation, injection detection,<br/>domain enforcement)]
+
+    Guardrails --> Orchestrator[Orchestrator]
+
+    %% =========================
+    %% Intent & Language
+    %% =========================
+    Orchestrator --> LangDetect[Language Detection]
+    Orchestrator --> Intent[Intent Classification<br/>(heuristic + LLM)]
+
+    %% =========================
+    %% Routing
+    %% =========================
+    Intent -->|RAG| RAG[RAG Agent]
+    Intent -->|Analytics| Analytics[Analytics Agent]
+    Intent -->|Reject| Reject[Reject Response]
+
+    %% =========================
+    %% RAG Path
+    %% =========================
+    RAG --> Retriever[Document Retriever<br/>(Supabase Vector Store)]
+    Retriever --> Context[Context Builder]
+    Context --> LLMRAG[LLM Answer Generation]
+    LLMRAG --> Insight[Insight Generator]
+
+    %% =========================
+    %% Analytics Path
+    %% =========================
+    Analytics --> SQL[SQL / Aggregation Engine]
+    SQL --> AnalyticsSummary[Analytics Summary]
+
+    %% =========================
+    %% Scoring & Validation
+    %% =========================
+    Insight --> Scoring[Answer Scoring<br/>(heuristic + embedding + numeric + optional LLM)]
+    AnalyticsSummary --> Scoring
+
+    %% =========================
+    %% Final Output
+    %% =========================
+    Scoring --> Response[Final Structured Response<br/>(answer, insight, citations, confidence)]
+    Reject --> Response

@@ -1,100 +1,14 @@
-# import os
-# import time
-# from typing import List, Union
-# from dotenv import load_dotenv
-# from pathlib import Path
-# from openai import OpenAI
-
-# # ------------------------------------------------------------
-# # LOAD .env RELIABLY
-# # ------------------------------------------------------------
-# env_path = Path(__file__).resolve().parents[2] / ".env"
-# load_dotenv(env_path, override=True)
-
-# # ------------------------------------------------------------
-# # CONFIG
-# # ------------------------------------------------------------
-# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-# EMBED_MODEL = "text-embedding-3-small"  
-# MAX_RETRIES = 5
-# MAX_CHARS = 7000
-
-# # client = get_openai_client()
-# _openai_client = None
-
-# def get_openai_client():
-#     global _openai_client
-#     if _openai_client is None:
-#         if not OPENAI_API_KEY:
-#             raise RuntimeError("OPENAI_API_KEY not set")
-#         _openai_client = OpenAI(api_key=OPENAI_API_KEY)
-#     return _openai_client
-
-# # ------------------------------------------------------------
-# # CLIENT
-# # ------------------------------------------------------------
-# # openai_client = OpenAI(api_key=OPENAI_API_KEY)
-# openai_client = get_openai_client()
-
-
-
-# # ------------------------------------------------------------
-# # CLEAN TEXT
-# # ------------------------------------------------------------
-# def _clean_text(text: str) -> str:
-#     if not text:
-#         return ""
-#     text = text.replace("\n", " ").replace("\t", " ").strip()
-#     return text[:MAX_CHARS]
-
-
-# # ------------------------------------------------------------
-# # EMBEDDING MODEL (OpenAI)
-# # ------------------------------------------------------------
-# class OpenAIEmbeddingModel:
-
-#     def embed_one(self, text: str) -> List[float]:
-#         text = _clean_text(text)
-#         for attempt in range(MAX_RETRIES):
-#             try:
-#                 resp = openai_client.embeddings.create(
-#                     model=EMBED_MODEL,
-#                     input=text
-#                 )
-#                 return resp.data[0].embedding
-#             except Exception:
-#                 if attempt == MAX_RETRIES - 1:
-#                     raise
-#                 time.sleep(1.2 * (attempt + 1))
-
-#     def embed_batch(self, texts: List[str]) -> List[List[float]]:
-#         cleaned = [_clean_text(t) for t in texts]
-#         for attempt in range(MAX_RETRIES):
-#             try:
-#                 resp = openai_client.embeddings.create(
-#                     model=EMBED_MODEL,
-#                     input=cleaned
-#                 )
-#                 return [d.embedding for d in resp.data]
-#             except Exception:
-#                 if attempt == MAX_RETRIES - 1:
-#                     raise
-#                 time.sleep(1.2 * (attempt + 1))
-
-#     def embed(self, data: Union[str, List[str]]):
-#         if isinstance(data, str):
-#             return self.embed_one(data)
-#         return self.embed_batch(data)
-
-
-# # ------------------------------------------------------------
-# # EXPORTS
-# # ------------------------------------------------------------
-# embedding_model = OpenAIEmbeddingModel()
-# chat_model = openai_client
-
-
 # src/embeddings/embedder.py
+"""
+Embedding utilities for an Enterprise Fraud Intelligence System.
+
+Design goals:
+- CI-safe (no external calls at import time)
+- Lazy OpenAI client initialization
+- Feature-flag controlled (can disable embeddings entirely)
+- Graceful degradation with stable dummy vectors
+- Backward compatibility for legacy callers
+"""
 
 import os
 from typing import List, Optional
@@ -103,22 +17,31 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ======================================================
-# CONFIG
-# ======================================================
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
 EMBEDDINGS_ENABLED = os.getenv("EMBEDDINGS_ENABLED", "true").lower() == "true"
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
-# ======================================================
-# LAZY CLIENTS (CRITICAL)
-# ======================================================
+# Stable dummy dimension (used when embeddings are disabled or fail)
+DUMMY_VECTOR_DIM = 384
+
+# =============================================================================
+# LAZY OPENAI CLIENT
+# =============================================================================
+
 _openai_client = None
 
 
 def _get_openai_client():
     """
-    Lazily create OpenAI client.
-    Safe at import time, validated at runtime.
+    Lazily instantiate OpenAI client.
+
+    Guarantees:
+    - No OpenAI dependency at import time
+    - API key validated only when embeddings are actually requested
+    - Safe for CI and unit tests
     """
     global _openai_client
 
@@ -129,99 +52,92 @@ def _get_openai_client():
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set")
 
-    from openai import OpenAI  # local import = CI safe
+    from openai import OpenAI  # local import → CI safe
     _openai_client = OpenAI(api_key=api_key)
     return _openai_client
 
-
-# ======================================================
+# =============================================================================
 # PUBLIC API
-# ======================================================
+# =============================================================================
+
 def embed_texts(texts: List[str]) -> List[List[float]]:
     """
     Generate embeddings for a list of texts.
 
     CI-safe behavior:
-    - If EMBEDDINGS_ENABLED=false → returns empty vectors
-    - No OpenAI usage at import
+    - If EMBEDDINGS_ENABLED=false → returns stable dummy vectors
+    - No OpenAI usage at import time
+    - Errors degrade gracefully to dummy vectors
+
+    Returns:
+        List[List[float]] with one vector per input text
     """
-
-    if not EMBEDDINGS_ENABLED:
-        logger.warning("[embedder] Embeddings disabled — returning empty vectors")
-        return [[0.0] * 384 for _ in texts]  # stable dummy vectors
-
     if not texts:
         return []
+
+    if not EMBEDDINGS_ENABLED:
+        logger.warning("[embedder] Embeddings disabled — returning dummy vectors")
+        return [[0.0] * DUMMY_VECTOR_DIM for _ in texts]
 
     client = _get_openai_client()
 
     try:
-        resp = client.embeddings.create(
+        response = client.embeddings.create(
             model=EMBEDDING_MODEL,
             input=texts,
         )
 
-        embeddings = [item.embedding for item in resp.data]
+        embeddings = [item.embedding for item in response.data]
 
-        logger.info(
-            f"[embedder] Generated {len(embeddings)} embeddings"
-        )
+        logger.info(f"[embedder] Generated {len(embeddings)} embeddings")
         return embeddings
 
     except Exception as e:
-        logger.error(f"[embedder] Embedding failed: {e}")
-        return [[0.0] * 384 for _ in texts]
+        logger.error(f"[embedder] Embedding generation failed: {e}")
+        return [[0.0] * DUMMY_VECTOR_DIM for _ in texts]
 
 
-# ======================================================
-# SINGLE-TEXT HELPER (OPTIONAL)
-# ======================================================
 def embed_text(text: str) -> Optional[List[float]]:
+    """
+    Convenience wrapper for single-text embedding.
+    """
     if not text:
         return None
 
     vectors = embed_texts([text])
     return vectors[0] if vectors else None
 
-# ======================================================
-# BACKWARD COMPATIBILITY (CRITICAL)
-# ======================================================
-
-# class _LazyEmbeddingModel:
-#     """
-#     Backward-compatible proxy so existing code that imports
-#     `embedding_model` does not break.
-
-#     Embeddings are generated lazily and CI-safe.
-#     """
-
-#     def embed_documents(self, texts):
-#         return embed_texts(texts)
-
-#     def embed_query(self, text):
-#         vec = embed_text(text)
-#         return vec or []
+# =============================================================================
+# BACKWARD COMPATIBILITY LAYER
+# =============================================================================
 
 class _LazyEmbeddingModel:
     """
     Backward-compatible proxy for legacy embedding_model usage.
-    CI-safe and lazy.
+
+    Supports:
+    - embed_documents(texts)
+    - embed_query(text)
+    - embed_one(text)
+
+    Used by:
+    - reranker
+    - scoring
+    - legacy pipelines
     """
 
-    def embed_documents(self, texts):
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
         return embed_texts(texts)
 
-    def embed_query(self, text):
+    def embed_query(self, text: str) -> List[float]:
         vec = embed_text(text)
         return vec or []
 
-    def embed_one(self, text):
+    def embed_one(self, text: str) -> List[float]:
         """
-        Legacy method expected by ranking.py
+        Legacy method expected by ranking / scoring modules.
         """
         vec = embed_text(text)
         return vec or []
 
-
-# Legacy symbol expected by scoring / ranking
 embedding_model = _LazyEmbeddingModel()
