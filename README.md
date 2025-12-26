@@ -447,4 +447,29 @@ not model tuning, but **decision-making, safety, reliability, and production rea
 
 It reflects how modern AI systems are built and operated in real enterprise environments.
 
+---
+
+## Live API Usage
+
+The API is publicly deployed and accessible at:
+
+https://ai-fraud-agent.onrender.com
+
+### Example Request
+
+```bash
+curl -X POST https://ai-fraud-agent.onrender.com/query \
+  -H "Content-Type: application/json" \
+  -d '{"query":"What are the main types of credit card fraud?"}'
+```
+---
+
+### Optional Local UI (Streamlit)
+
+A Streamlit-based UI is included for local exploration and demos.
+
+Run locally:
+```bash
+streamlit run ui/app.py
+```
 
