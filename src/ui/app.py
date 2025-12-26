@@ -40,8 +40,7 @@ st.set_page_config(
 )
 
 st.markdown(
-    "<h1 style='margin-bottom:0.2rem;'>🧠 Fraud Intelligence AI Platform
-</h1>",
+    "<h1 style='margin-bottom:0.2rem;'>🧠 Fraud Intelligence AI Platform</h1>",
     unsafe_allow_html=True,
 )
 st.caption("Fraud analytics · Fraud Doc RAG · Multilingual assistant")
