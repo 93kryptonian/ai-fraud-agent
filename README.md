@@ -453,7 +453,11 @@ It reflects how modern AI systems are built and operated in real enterprise envi
 
 The API is publicly deployed and accessible at:
 
+Production API:
 https://ai-fraud-agent.onrender.com
+
+Interactive API Docs (Swagger):
+https://ai-fraud-agent.onrender.com/docs
 
 ### Example Request
 
