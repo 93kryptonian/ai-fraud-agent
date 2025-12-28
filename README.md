@@ -477,3 +477,43 @@ Run locally:
 streamlit run ui/app.py
 ```
 
+---
+
+## System Design & Ownership
+
+This project includes explicit design documentation that captures **system intent, ownership boundaries, and production reasoning** beyond code.
+
+These documents reflect how real AI systems are designed, evaluated, safeguarded, operated, and evolved.
+
+### Design Layers
+
+- **Layer 1 — System Contract**  
+  Defines what the system accepts, rejects, guarantees, and explicitly does not do.  
+  [`docs/system_contract.md`](docs/system_contract.md)
+
+- **Layer 2 — Architecture & Routing**  
+  Explains agents, routing logic, orchestration, and the hybrid RAG + analytics design.  
+  (See Architecture section in this README)
+
+- **Layer 3 — Evaluation**  
+  Describes offline evaluation, routing correctness, hallucination detection, and regression testing strategy.  
+  [`eval/README.md`](eval/README.md)
+
+- **Layer 4 — Observability**  
+  Details query-level tracing, structured logging, cost tracking, and failure visibility without heavy tooling.  
+  [`docs/observability.md`](docs/observability.md)
+
+- **Layer 5 — Operations**  
+  Covers deployment, change management, incident response, scaling considerations, and operational ownership.  
+  [`docs/operations.md`](docs/operations.md)
+
+- **Layer 6 — Evolution**  
+  Describes how the system changes safely over time: versioning, backward compatibility, migrations, and deprecation strategy.  
+  [`docs/evolution.md`](docs/evolution.md)
+
+- **Cross-Cutting — Failure Modes & Safeguards**  
+  Enumerates known failure modes, detection signals, mitigation strategies, and explicit non-goals.  
+  [`docs/failure_modes.md`](docs/failure_modes.md)
+
+These layers are intentionally separated from the main README to keep the project navigable while demonstrating **end-to-end AI system ownership**.
+

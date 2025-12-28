@@ -1,0 +1,18 @@
+Q1:
+  expected_route: analytics
+  expected_behavior: answer
+  must_include:
+    - fraud rate
+    - time
+  language: en
+
+Q2:
+  expected_route: rag
+  expected_behavior: answer
+  must_include:
+    - card-not-present
+  language: id
+
+Q3:
+  expected_route: reject
+  expected_behavior: refusal
