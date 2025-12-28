@@ -1,0 +1,11 @@
+- id: Q1
+  text: "How does the monthly fraud rate change over time?"
+  language: en
+
+- id: Q2
+  text: "Apa itu card-not-present fraud?"
+  language: id
+
+- id: Q3
+  text: "How to detect crypto rug pulls?"
+  language: en
