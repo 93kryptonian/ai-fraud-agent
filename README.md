@@ -479,6 +479,12 @@ streamlit run ui/app.py
 
 ---
 
+### Medium Article
+
+Architecture deep dive: [From Chatbots to Systems: Designing Production-Grade AI Fraud Intelligence](https://medium.com/@93Kryptonian/from-chatbots-to-systems-designing-production-grade-ai-fraud-intelligence-9b05402b22e7)
+
+---
+
 ## System Design & Ownership
 
 This project includes explicit design documentation that captures **system intent, ownership boundaries, and production reasoning** beyond code.
