@@ -4,6 +4,8 @@ API routing layer.
 
 Responsibilities:
 - Define public API endpoints
+- Assign a request_id to every incoming request (M3 observability context),
+  before anything else runs, so even a guardrail rejection is correlatable
 - Validate request schemas
 - Enforce input guardrails (safety/domain) before delegating
 - Delegate execution to application services
@@ -21,6 +23,7 @@ from src.rag.rag_chain import run_rag
 from src.analytics.fraud_analytics import run_analytics
 from src.safety.guardrails import validate_query
 from src.llm.response_schema import ErrorResponse
+from src.observability.context import new_request_id, set_request_id
 
 router = APIRouter(prefix="", tags=["api"])
 
@@ -34,6 +37,8 @@ async def query_endpoint(req: QueryRequest):
     - High-level questions
     - Intelligent routing between RAG and analytics flows
     """
+    set_request_id(new_request_id())
+
     ok, cleaned_or_msg, lang = validate_query(req.query)
     if not ok:
         return {
@@ -58,6 +63,8 @@ async def rag_endpoint(req: RAGRequest):
     Output:
     - Context-aware LLM response
     """
+    set_request_id(new_request_id())
+
     ok, cleaned_or_msg, _ = validate_query(req.query)
     if not ok:
         return JSONResponse(
@@ -81,6 +88,8 @@ async def analytics_endpoint(req: AnalyticsRequest):
     - Risk insights
     - Analytical reasoning over structured signals
     """
+    set_request_id(new_request_id())
+
     ok, cleaned_or_msg, _ = validate_query(req.query)
     if not ok:
         return JSONResponse(
