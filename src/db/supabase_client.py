@@ -14,7 +14,7 @@ Design principles:
 """
 
 import os
-from typing import Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -32,6 +32,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
+SQL_TIMEOUT_MS = int(os.getenv("SQL_TIMEOUT_MS", "15000"))
 
 # =============================================================================
 # LAZY SUPABASE CLIENT (SINGLETON)
@@ -89,3 +90,42 @@ class DB:
         Access a Supabase table.
         """
         return self.client.table(name)
+
+    @staticmethod
+    def sql(query: str, params: Optional[Sequence[Any]] = None) -> List[Dict[str, Any]]:
+        """
+        Execute a read-only SQL query via direct Postgres connection.
+
+        Safety:
+        - Transaction is READ ONLY → DB rejects any DDL/DML, even if the
+          SELECT-only string check upstream is bypassed
+        - statement_timeout bounds runaway queries
+        """
+        if not SUPABASE_DB_URL:
+            raise RuntimeError("SUPABASE_DB_URL is not set")
+
+        import psycopg2  # local import → CI safe
+        from psycopg2.extras import RealDictCursor
+
+        conn = psycopg2.connect(SUPABASE_DB_URL, connect_timeout=10)
+        try:
+            conn.set_session(readonly=True)
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(f"SET LOCAL statement_timeout = {SQL_TIMEOUT_MS}")
+                cur.execute(query, params)
+                rows = cur.fetchall() if cur.description else []
+            conn.rollback()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def insert(table: str, rows: List[Dict[str, Any]]):
+        """
+        Insert rows through Supabase (service role preferred, bypasses RLS).
+        """
+        if SUPABASE_SERVICE_ROLE_KEY and SUPABASE_URL:
+            client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        else:
+            client = get_supabase()
+        return client.table(table).insert(rows).execute()

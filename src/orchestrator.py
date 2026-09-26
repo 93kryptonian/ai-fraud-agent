@@ -105,18 +105,24 @@ def detect_intent_llm(query: str) -> Tuple[str, str]:
         intent: "rag" | "analytics" | "reject"
         lang: "en" | "id"
     """
-    prompt = INTENT_CLASSIFICATION_PROMPT.format(q=query)
-    resp = llm.run(prompt, temperature=0.0)
-
+    resp = None
     try:
-        data = json.loads(resp)
+        prompt = INTENT_CLASSIFICATION_PROMPT.format(q=query)
+        resp = llm.run(prompt, temperature=0.0)
+        data = json.loads(llm._extract_json_block(str(resp)))
         intent = data.get("intent", "rag")
         lang = data.get("language", "en")
     except Exception as e:
         logger.error(
-            f"[intent_llm] Failed to parse response: {e} | resp={resp!r}"
+            f"[intent_llm] Failed to classify: {e} | resp={resp!r}"
         )
         intent, lang = "rag", "en"
+
+    # Never trust unvalidated LLM labels for routing
+    if intent not in {"rag", "analytics", "reject"}:
+        intent = "rag"
+    if lang not in {"en", "id"}:
+        lang = "en"
 
     logger.info(f"[intent_llm] intent={intent} lang={lang}")
     return intent, lang
