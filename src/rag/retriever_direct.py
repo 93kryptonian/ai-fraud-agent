@@ -18,6 +18,8 @@ from typing import List, Dict, Optional
 
 from src.utils.logger import get_logger
 from src.db.supabase_client import get_supabase
+from src.embeddings.embedder import embed_text
+from src.rag.ranking import rerank_chunks
 
 logger = get_logger(__name__)
 
@@ -50,7 +52,7 @@ def retrieve_top_k(
         - content
         - source_name
         - page
-        - chunk_index
+        - similarity (pgvector cosine similarity)
     """
     logger.info(
         f"[retriever_direct] query={query!r} | source={source_name} | top_k={top_k}"
@@ -77,24 +79,34 @@ def retrieve_top_k(
         return []
 
     # ------------------------------------------------------------------
-    # QUERY EXECUTION
+    # QUERY EMBEDDING
+    # ------------------------------------------------------------------
+    query_vec = embed_text(query)
+    if not query_vec or not any(query_vec):
+        # Disabled / failed embeddings yield zero vectors → meaningless search
+        logger.warning(
+            "[retriever_direct] No usable query embedding — returning empty result"
+        )
+        return []
+
+    # ------------------------------------------------------------------
+    # VECTOR SEARCH (pgvector via match_documents RPC) + HYBRID RERANK
     # ------------------------------------------------------------------
     try:
-        query_builder = (
-            supabase
-            .table("document_embeddings")
-            .select("content, source_name, page, chunk_index")
-            .limit(top_k)
-        )
+        # filter must be NULL (not {}) for "no filter" — see match_documents()
+        response = supabase.rpc(
+            "match_documents",
+            {
+                "filter": {"source_name": source_name} if source_name else None,
+                "query_embedding": query_vec,
+            },
+        ).execute()
+        candidates = response.data or []
 
-        if source_name:
-            query_builder = query_builder.eq("source_name", source_name)
-
-        response = query_builder.execute()
-        rows = response.data or []
+        rows = rerank_chunks(query, candidates, use_llm=False, top_k=top_k)
 
         logger.info(
-            f"[retriever_direct] Retrieved {len(rows)} chunks"
+            f"[retriever_direct] Retrieved {len(candidates)} candidates → {len(rows)} chunks"
         )
         return rows
 

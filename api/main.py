@@ -11,10 +11,13 @@ Responsibilities:
 This module intentionally contains no business logic.
 """
 
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routers import router
+from src.safety.rate_limit import RateLimitMiddleware
 
 
 def create_app() -> FastAPI:
@@ -43,13 +46,31 @@ def configure_middleware(app: FastAPI) -> None:
     Configure global middleware.
 
     Note:
-    CORS is intentionally permissive because this API
-    is exposed as a public portfolio/demo service.
+    CORS is intentionally permissive (any origin) because this API
+    is exposed as a public portfolio/demo service. `allow_credentials`
+    is False — no cookies/sessions are used, and the combination of
+    allow_origins=["*"] with allow_credentials=True is invalid per the
+    CORS spec (browsers reject it) as well as an unnecessary risk.
+
+    A simple per-IP rate limiter guards against runaway LLM cost from
+    a single client (see src/safety/rate_limit.py for limitations).
+
+    Middleware order matters: Starlette wraps middleware so the LAST
+    one added to the app is the OUTERMOST layer. CORSMiddleware is
+    added last so it wraps the rate limiter — this way CORS headers
+    are still attached to a 429 response, and the CORS preflight
+    (OPTIONS) short-circuits before it can ever be counted/blocked by
+    the rate limiter.
     """
+    app.add_middleware(
+        RateLimitMiddleware,
+        requests_per_window=int(os.getenv("RATE_LIMIT_PER_MINUTE", "20")),
+        window_seconds=60,
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )

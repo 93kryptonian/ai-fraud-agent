@@ -17,6 +17,7 @@ Usage:
 
 import os
 import hashlib
+import uuid
 import concurrent.futures
 from pathlib import Path
 from datetime import datetime
@@ -52,9 +53,9 @@ def sha256_text(text: str) -> str:
 
 def generate_uuid() -> str:
     """
-    Generate UUID using system utility (portable & collision-safe).
+    Generate a UUID4 (portable & collision-safe, no external process).
     """
-    return os.popen("uuidgen").read().strip()
+    return str(uuid.uuid4())
 
 
 def safe_insert(table: str, rows: List[Dict]):
@@ -158,7 +159,7 @@ def process_pdf(pdf_path: str):
         batch_hashes.append(p["hash"])
 
         if len(batch_texts) == EMB_BATCH_SIZE:
-            vectors = embedding_model.embed(batch_texts)
+            vectors = embedding_model.embed_documents(batch_texts)
 
             for h, v in zip(batch_hashes, vectors):
                 embedding_rows.append({
@@ -173,7 +174,7 @@ def process_pdf(pdf_path: str):
 
     # Final partial batch
     if batch_texts:
-        vectors = embedding_model.embed(batch_texts)
+        vectors = embedding_model.embed_documents(batch_texts)
         for h, v in zip(batch_hashes, vectors):
             embedding_rows.append({
                 "id": generate_uuid(),

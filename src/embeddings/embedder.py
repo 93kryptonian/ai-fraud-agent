@@ -24,8 +24,11 @@ logger = get_logger(__name__)
 EMBEDDINGS_ENABLED = os.getenv("EMBEDDINGS_ENABLED", "true").lower() == "true"
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
+# Must match the pgvector column size in infra/supabase_schema.sql
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "768"))
+
 # Stable dummy dimension (used when embeddings are disabled or fail)
-DUMMY_VECTOR_DIM = 384
+DUMMY_VECTOR_DIM = EMBEDDING_DIM
 
 # =============================================================================
 # LAZY OPENAI CLIENT
@@ -85,6 +88,7 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
         response = client.embeddings.create(
             model=EMBEDDING_MODEL,
             input=texts,
+            dimensions=EMBEDDING_DIM,
         )
 
         embeddings = [item.embedding for item in response.data]

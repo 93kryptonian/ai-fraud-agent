@@ -76,6 +76,10 @@ def _embedding_scores(query: str, chunks: List[Dict[str, Any]]) -> List[float]:
     Falls back to zeros when embeddings are unavailable
     (e.g. CI, offline, or cost-restricted environments).
     """
+    # Reuse vector-store similarity when present (avoids 1 API call per chunk)
+    if chunks and all("similarity" in c for c in chunks):
+        return [float(c["similarity"] or 0.0) for c in chunks]
+
     if not EMBEDDINGS_AVAILABLE:
         logger.info("[ranking] Embeddings disabled — using zero scores")
         return [0.0] * len(chunks)

@@ -25,9 +25,9 @@ Detect the language of the user's query.
 
 Return STRICT JSON only:
 
-{
+{{
   "language": "en" | "id"
-}
+}}
 
 Text:
 {q}
@@ -68,10 +68,10 @@ Classify the user's query into EXACTLY ONE intent:
 
 Return STRICT JSON only:
 
-{
+{{
   "intent": "rag" | "analytics" | "reject",
   "language": "en" | "id"
-}
+}}
 
 User query:
 {q}
