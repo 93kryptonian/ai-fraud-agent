@@ -59,4 +59,4 @@ Rules:
 - 3-5 sentences only
 """.strip()
 
-    return llm.run(prompt, temperature=0.2)
+    return llm.run(prompt, temperature=0.2, purpose="rag_insight")
