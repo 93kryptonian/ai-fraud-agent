@@ -24,6 +24,8 @@ from src.db.supabase_client import DB
 from src.llm.llm_client import llm
 from src.llm.prompts import ANALYTICS_SYSTEM_PROMPT, NL_TO_SQL_PROMPT
 from src.llm.response_schema import AnalyticsResponse, ErrorResponse
+from src.observability.events import emit_event
+from src.observability.timing import elapsed_timer
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -201,7 +203,7 @@ def nl_to_sql(nl_query: str, intent: str) -> str:
         raise ValueError("LLM-based SQL generation is disabled.")
 
     prompt = NL_TO_SQL_PROMPT.format(q=nl_query)
-    raw = llm.run(prompt, temperature=0.0)
+    raw = llm.run(prompt, temperature=0.0, purpose="analytics_nl_to_sql")
     sql = normalize_sql(strip_markdown(str(raw)))
 
     if not is_safe_select(sql):
@@ -407,7 +409,7 @@ Refine wording only. Do not change numbers or facts.
 """
 
     try:
-        resp = llm.run(prompt, temperature=0.1)
+        resp = llm.run(prompt, temperature=0.1, purpose="analytics_summary")
         return resp.strip() if isinstance(resp, str) and resp.strip() else summary
     except Exception as e:
         logger.warning(f"[analytics] LLM refinement failed: {e}")
@@ -420,81 +422,151 @@ Refine wording only. Do not change numbers or facts.
 def run_analytics(nl_query: str, lang: str = "en") -> Dict[str, Any]:
     """
     Main fraud analytics pipeline.
+
+    M6 instrumentation notes:
+    - analytics.completed represents this function's own outcome (did it
+      compute and return an answer, or did something genuinely break) —
+      it is emitted exactly once, at every return point, via the
+      _completed() closure below. It is deliberately NOT the same thing
+      as "the business question was answerable" — an honest "insufficient
+      data" response is analytics.completed(status=success), same as a
+      full ranking summary. Only the outer except (a real, unexpected
+      failure) is status=failure. This mirrors the same
+      request-lifecycle-vs-business-outcome distinction locked since M5.
+    - analytics.sql is a separate, inner stage: primary SQL attempt, then
+      (if needed) a fallback template — exactly one terminal event for
+      that whole resolution, not one per attempt (same "one terminal
+      event per stage" rule used for LLM retries).
+    - The details=str(e) in the except block below is a pre-existing,
+      separate application bug (can leak SQL/DB internals into the HTTP
+      response) — left untouched here on purpose; fixing it is an app
+      bug fix, not an observability change, and mixing the two was
+      explicitly the wrong call per the M6 design review.
     """
-    try:
-        q_lower = nl_query.lower()
+    with elapsed_timer() as elapsed:
 
-        fraud_keywords = (
-            "fraud", "penipuan", "isfraud", "transaksi",
-            "daily", "monthly", "harian", "bulanan",
-            "trend", "over time", "fluctuate",
-        )
-
-        if not any(k in q_lower for k in fraud_keywords):
-            msg = (
-                "Sorry, I can only analyze fraud-related transaction data."
-                if lang == "en"
-                else "Maaf, saya hanya dapat menganalisis data transaksi terkait fraud."
+        def _completed(status: str, **metadata):
+            emit_event(
+                "analytics.completed", step="analytics", status=status,
+                duration_ms=elapsed(), metadata=metadata,
             )
-            return AnalyticsResponse(
-                answer=msg,
-                data_points=None,
-                chart_data=None,
-                confidence=0.0,
-            ).model_dump()
 
-        intent = classify_analytics_intent(nl_query)
-        logger.info(f"[analytics] intent={intent} | query={nl_query!r}")
-
-        df = pd.DataFrame()
         try:
-            sql = nl_to_sql(nl_query, intent)
-            df = execute_sql(sql)
-        except Exception as e:
-            logger.warning(f"[analytics] NL→SQL failed: {e}")
+            q_lower = nl_query.lower()
 
-        if df.empty:
-            logger.info("[analytics] Using fallback SQL.")
-            if intent == "timeseries":
-                df = execute_sql(fallback_time_series_sql(nl_query))
-            elif intent == "category_rank":
-                df = execute_sql(fallback_count_by_category_sql())
-            elif intent == "merchant_rank":
-                df = execute_sql(fallback_merchant_fraud_sql())
-
-        if df.empty:
-            msg = (
-                "Insufficient data to answer the question."
-                if lang == "en"
-                else "Data tidak mencukupi untuk menjawab pertanyaan."
+            fraud_keywords = (
+                "fraud", "penipuan", "isfraud", "transaksi",
+                "daily", "monthly", "harian", "bulanan",
+                "trend", "over time", "fluctuate",
             )
+
+            if not any(k in q_lower for k in fraud_keywords):
+                msg = (
+                    "Sorry, I can only analyze fraud-related transaction data."
+                    if lang == "en"
+                    else "Maaf, saya hanya dapat menganalisis data transaksi terkait fraud."
+                )
+                _completed("success", intent=None, confidence=0.0, chart_generated=False)
+                return AnalyticsResponse(
+                    answer=msg,
+                    data_points=None,
+                    chart_data=None,
+                    confidence=0.0,
+                ).model_dump()
+
+            intent = classify_analytics_intent(nl_query)
+            logger.info(f"[analytics] intent={intent} | query={nl_query!r}")
+
+            # ---------------------------------------------------------
+            # analytics.sql — primary attempt, then fallback if needed.
+            # One terminal event for this whole resolution.
+            # ---------------------------------------------------------
+            with elapsed_timer() as sql_elapsed:
+                df = pd.DataFrame()
+                primary_error_type = None
+                used_fallback_sql = False
+
+                try:
+                    sql = nl_to_sql(nl_query, intent)
+                    df = execute_sql(sql)
+                except Exception as e:
+                    primary_error_type = type(e).__name__
+                    logger.warning(f"[analytics] NL→SQL failed: {e}")
+
+                if df.empty:
+                    used_fallback_sql = True
+                    logger.info("[analytics] Using fallback SQL.")
+                    try:
+                        if intent == "timeseries":
+                            df = execute_sql(fallback_time_series_sql(nl_query))
+                        elif intent == "category_rank":
+                            df = execute_sql(fallback_count_by_category_sql())
+                        elif intent == "merchant_rank":
+                            df = execute_sql(fallback_merchant_fraud_sql())
+                        # "generic" intent has no fallback template — df
+                        # stays empty, handled by the insufficient-data
+                        # branch below, not a failure of this stage.
+                    except Exception as e:
+                        emit_event(
+                            "analytics.sql.failed", step="analytics.sql", status="failure",
+                            duration_ms=sql_elapsed(),
+                            metadata={
+                                "intent": intent, "used_fallback_sql": True,
+                                "primary_error_type": primary_error_type,
+                                "error_type": type(e).__name__,
+                            },
+                        )
+                        # Preserves existing behavior exactly: this branch
+                        # was already unprotected before M6 (an exception
+                        # here always propagated to the outer except) —
+                        # observe, then re-raise, never swallow.
+                        raise
+
+                emit_event(
+                    "analytics.sql.completed", step="analytics.sql", status="success",
+                    duration_ms=sql_elapsed(),
+                    metadata={
+                        "intent": intent, "used_fallback_sql": used_fallback_sql,
+                        "primary_error_type": primary_error_type, "row_count": len(df),
+                    },
+                )
+
+            if df.empty:
+                msg = (
+                    "Insufficient data to answer the question."
+                    if lang == "en"
+                    else "Data tidak mencukupi untuk menjawab pertanyaan."
+                )
+                _completed("success", intent=intent, confidence=0.0, chart_generated=False)
+                return AnalyticsResponse(
+                    answer=msg,
+                    data_points=None,
+                    chart_data=None,
+                    confidence=0.0,
+                ).model_dump()
+
+            if intent == "timeseries":
+                summary, conf = summarize_timeseries(df, lang)
+            elif intent in {"merchant_rank", "category_rank"}:
+                summary, conf = summarize_ranking(df, lang)
+            else:
+                summary, conf = summarize_generic(df, lang)
+
+            chart = to_chart_data(df)
+            summary = refine_summary_with_llm(summary, df, lang)
+
+            _completed("success", intent=intent, confidence=conf, chart_generated=chart is not None)
             return AnalyticsResponse(
-                answer=msg,
-                data_points=None,
-                chart_data=None,
-                confidence=0.0,
+                answer=strip_html(summary),
+                data_points=df.to_dict(orient="records"),
+                chart_data=chart,
+                confidence=conf,
             ).model_dump()
 
-        if intent == "timeseries":
-            summary, conf = summarize_timeseries(df, lang)
-        elif intent in {"merchant_rank", "category_rank"}:
-            summary, conf = summarize_ranking(df, lang)
-        else:
-            summary, conf = summarize_generic(df, lang)
-
-        chart = to_chart_data(df)
-        summary = refine_summary_with_llm(summary, df, lang)
-
-        return AnalyticsResponse(
-            answer=strip_html(summary),
-            data_points=df.to_dict(orient="records"),
-            chart_data=chart,
-            confidence=conf,
-        ).model_dump()
-
-    except Exception as e:
-        logger.error("[analytics] Pipeline failed", exc_info=True)
-        return ErrorResponse(
-            error="Analytics failed.",
-            details=str(e),
-        ).model_dump()
+        except Exception as e:
+            logger.error("[analytics] Pipeline failed", exc_info=True)
+            _completed("failure", error_type=type(e).__name__)
+            return ErrorResponse(
+                error="Analytics failed.",
+                details=str(e),
+            ).model_dump()
