@@ -9,6 +9,11 @@ Design goals:
 - Cost tracking & soft budget enforcement
 - Optional schema validation
 - Retry with backoff
+- Honest failure: exhausting retries raises LLMExhaustedRetriesError (P1),
+  never returns a fake-success sentinel string — every caller that doesn't
+  already handle exceptions from this call must be checked, not assumed
+  safe (see the P1 audit in the observability memory / commit for the
+  full list of call sites this was verified against)
 """
 
 import os
@@ -19,10 +24,45 @@ from typing import Optional, Type, Any, Dict, List
 from dotenv import load_dotenv
 from pydantic import BaseModel, ValidationError
 
+from src.observability.cost import add_request_cost
 from src.utils.logger import get_logger
 
 load_dotenv()
 logger = get_logger(__name__)
+
+# =============================================================================
+# STRUCTURED FAILURE (P1 — prerequisite for M6 LLM telemetry)
+# =============================================================================
+
+
+class LLMExhaustedRetriesError(Exception):
+    """
+    Raised by LLMClient.run() when every retry attempt has failed.
+
+    Previously, exhausting retries returned the literal string
+    "LLM failed after retries." as if it were a valid answer — every
+    caller, and any future observability code, had no reliable way to
+    tell a real failure apart from a genuine (if oddly-worded) response.
+    Raising a real, typed exception fixes that at the source, instead of
+    having callers or the observability layer string-match a sentinel.
+
+    `retry_count` and `last_error_type` are the two fields anything
+    downstream (M6's llm.completed/failed events, in particular) should
+    read. Never put str(this exception), or the wrapped underlying error's
+    message, into a telemetry event or a user-facing response — that's
+    exactly the class of leak the privacy rules elsewhere in this project
+    (docs/observability-contract.md §6) already forbid. The full original
+    exception is kept as __cause__ purely for local debugging/log output.
+    """
+
+    def __init__(self, retry_count: int, last_error: BaseException):
+        self.retry_count = retry_count
+        self.last_error_type = type(last_error).__name__
+        super().__init__(
+            f"LLM call failed after {retry_count} attempts "
+            f"(last error type: {self.last_error_type})"
+        )
+        self.__cause__ = last_error
 
 # =============================================================================
 # ENV CONFIGURATION (SAFE AT IMPORT)
@@ -182,6 +222,7 @@ class LLMClient:
 
         selected_model = model or self.default_model
         extra_params = extra_params or {}
+        last_error: Optional[Exception] = None
 
         for attempt in range(1, MAX_RETRIES + 1):
 
@@ -219,6 +260,11 @@ class LLMClient:
                         usage.completion_tokens or 0,
                     )
                     SESSION_COST_USD += cost
+                    # P2: additive, request-scoped accumulation for
+                    # trustworthy per-request cost attribution — does not
+                    # replace or affect the process-global budget guard
+                    # above. See src/observability/cost.py docstring.
+                    add_request_cost(cost)
 
                 # -------------------------------
                 # Optional schema validation
@@ -235,12 +281,13 @@ class LLMClient:
                 return text
 
             except Exception as e:
+                last_error = e
                 logger.warning(
                     f"[llm] Error attempt={attempt}/{MAX_RETRIES}: {e}"
                 )
                 time.sleep(1.2 * attempt)
 
-        return "LLM failed after retries."
+        raise LLMExhaustedRetriesError(retry_count=MAX_RETRIES, last_error=last_error)
 
 # =============================================================================
 # SINGLETON INSTANCE

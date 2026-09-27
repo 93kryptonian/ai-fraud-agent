@@ -178,7 +178,16 @@ def validate_query(
     intentionally independent of the human-facing message: callers building
     telemetry must use `reason`, never infer one by parsing the message.
     """
-    lang = detect_language(text)
+    # Unlike orchestrator.py's own detect_language() call, this one had no
+    # surrounding try/except before P1 (src/llm/llm_client.py). It relied on
+    # llm.run() never raising — LLM failures used to silently produce a
+    # sentinel string that happened to resolve to "en" here. Now that
+    # llm.run() raises on exhausted retries (P1), this preserves that exact
+    # prior fallback behavior explicitly instead of by accident.
+    try:
+        lang = detect_language(text)
+    except Exception:
+        lang = "en"
 
     # -------------------------------------------------
     # 1. Empty / meaningless input

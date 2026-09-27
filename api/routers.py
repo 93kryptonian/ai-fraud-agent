@@ -30,6 +30,7 @@ from src.analytics.fraud_analytics import run_analytics
 from src.safety.guardrails import validate_query
 from src.llm.response_schema import ErrorResponse
 from src.observability.context import new_request_id, set_request_id
+from src.observability.cost import reset_request_cost
 from src.observability.events import emit_event, query_hash
 from src.observability.timing import elapsed_timer
 
@@ -80,6 +81,7 @@ async def query_endpoint(req: QueryRequest):
     - Intelligent routing between RAG and analytics flows
     """
     set_request_id(new_request_id())
+    reset_request_cost()
 
     with elapsed_timer() as elapsed:
         try:
@@ -124,6 +126,7 @@ async def rag_endpoint(req: RAGRequest):
     - Context-aware LLM response
     """
     set_request_id(new_request_id())
+    reset_request_cost()
 
     with elapsed_timer() as elapsed:
         try:
@@ -167,6 +170,7 @@ async def analytics_endpoint(req: AnalyticsRequest):
     - Analytical reasoning over structured signals
     """
     set_request_id(new_request_id())
+    reset_request_cost()
 
     with elapsed_timer() as elapsed:
         try:
