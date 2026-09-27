@@ -69,6 +69,32 @@ def test_query_rewrite_dry_run():
     assert meta.get("lang") in {"id", "en"}
 
 
+def test_query_rewrite_fails_closed_when_llm_unavailable(monkeypatch):
+    """
+    Regression test: llm_client.run() now raises LLMExhaustedRetriesError
+    once retries are exhausted (instead of returning a fake-success
+    sentinel string). process_query() must still return normally by
+    falling back to the untranslated/unrewritten text at each of its own
+    internal LLM calls — this exact scenario (an Indonesian query with no
+    real API key) previously crashed this test until process_query() was
+    made to fail closed on its own, rather than relying on every caller
+    to happen to wrap it.
+    """
+    from src.rag.question_rewrite import process_query
+    from src.llm.llm_client import LLMExhaustedRetriesError
+
+    def _always_raises(*args, **kwargs):
+        raise LLMExhaustedRetriesError(retry_count=4, last_error=RuntimeError("no API key"))
+
+    monkeypatch.setattr("src.rag.question_rewrite.llm.run", _always_raises)
+
+    final_query, meta = process_query("apa itu card-not-present fraud?")
+
+    assert isinstance(final_query, str)
+    assert final_query  # falls back to the original text, not empty/crashed
+    assert meta["translated"] is False  # translation failed, so it's honestly reported as such
+
+
 # ============================================================
 # Retriever
 # ============================================================
