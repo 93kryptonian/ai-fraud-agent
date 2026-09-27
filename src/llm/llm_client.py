@@ -25,6 +25,8 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, ValidationError
 
 from src.observability.cost import add_request_cost
+from src.observability.events import emit_event
+from src.observability.timing import elapsed_timer
 from src.utils.logger import get_logger
 
 load_dotenv()
@@ -209,6 +211,7 @@ class LLMClient:
         system_prompt: Optional[str] = None,
         messages: Optional[List[Dict[str, str]]] = None,
         extra_params: Optional[Dict[str, Any]] = None,
+        purpose: str = "unspecified",
     ) -> Any:
         """
         Execute a single LLM request.
@@ -217,6 +220,20 @@ class LLMClient:
         - Retries with backoff
         - Falls back to cheaper model after budget threshold
         - Optionally validates structured responses
+
+        purpose (M6): a stable tag identifying which call site this is
+        (e.g. "rag_answer", "intent_classification", "analytics_nl_to_sql")
+        — see docs/observability-contract.md §1 for the full list. This
+        function is called from ~10 different places, so llm.completed/
+        failed events are only meaningful with this tag attached; without
+        it, one request's several LLM calls would be indistinguishable in
+        the event stream. "unspecified" is a defensive default, not
+        expected to ever actually appear — every real call site passes it.
+
+        Timing/events (M6): one terminal event per call to this method,
+        covering the full retry loop's elapsed time — not one event per
+        attempt. retry_count is the number of attempts beyond the first
+        that were needed (0 if it succeeded on the first try).
         """
         global SESSION_COST_USD
 
@@ -224,70 +241,119 @@ class LLMClient:
         extra_params = extra_params or {}
         last_error: Optional[Exception] = None
 
-        for attempt in range(1, MAX_RETRIES + 1):
+        with elapsed_timer() as elapsed:
+            for attempt in range(1, MAX_RETRIES + 1):
 
-            # Soft budget guard → downgrade model
-            if SESSION_COST_USD >= MAX_COST_USD:
-                selected_model = self.fallback_model
-
-            try:
-                client = get_openai_client()
-
-                msgs = self._build_messages(
-                    prompt=prompt,
-                    system_prompt=system_prompt,
-                    messages=messages,
-                )
-
-                response = client.chat.completions.create(
-                    model=selected_model,
-                    messages=msgs,
-                    max_tokens=MAX_TOKENS,
-                    temperature=temperature,
-                    **extra_params,
-                )
-
-                text = (response.choices[0].message.content or "").strip()
-
-                # -------------------------------
-                # Cost tracking
-                # -------------------------------
-                usage = getattr(response, "usage", None)
-                if usage:
-                    cost = estimate_cost(
-                        selected_model,
-                        usage.prompt_tokens or 0,
-                        usage.completion_tokens or 0,
+                # Soft budget guard → downgrade model
+                if SESSION_COST_USD >= MAX_COST_USD and selected_model != self.fallback_model:
+                    emit_event(
+                        "llm.fallback", step="llm", status="success",
+                        metadata={
+                            "purpose": purpose,
+                            "from_model": selected_model,
+                            "to_model": self.fallback_model,
+                            "reason": "budget_threshold",
+                            "cumulative_session_cost_usd": round(SESSION_COST_USD, 6),
+                        },
                     )
-                    SESSION_COST_USD += cost
-                    # P2: additive, request-scoped accumulation for
-                    # trustworthy per-request cost attribution — does not
-                    # replace or affect the process-global budget guard
-                    # above. See src/observability/cost.py docstring.
-                    add_request_cost(cost)
+                    selected_model = self.fallback_model
 
-                # -------------------------------
-                # Optional schema validation
-                # -------------------------------
-                if response_schema:
-                    try:
-                        json_str = self._extract_json_block(text)
-                        return response_schema.model_validate_json(json_str)
-                    except ValidationError:
-                        logger.warning(
-                            "[llm] Schema validation failed — returning raw text"
-                        )
+                try:
+                    client = get_openai_client()
 
-                return text
+                    msgs = self._build_messages(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        messages=messages,
+                    )
 
-            except Exception as e:
-                last_error = e
-                logger.warning(
-                    f"[llm] Error attempt={attempt}/{MAX_RETRIES}: {e}"
-                )
-                time.sleep(1.2 * attempt)
+                    response = client.chat.completions.create(
+                        model=selected_model,
+                        messages=msgs,
+                        max_tokens=MAX_TOKENS,
+                        temperature=temperature,
+                        **extra_params,
+                    )
 
-        raise LLMExhaustedRetriesError(retry_count=MAX_RETRIES, last_error=last_error)
+                    text = (response.choices[0].message.content or "").strip()
+
+                    # -------------------------------
+                    # Cost tracking
+                    # -------------------------------
+                    usage = getattr(response, "usage", None)
+                    prompt_tokens = completion_tokens = None
+                    cost = None
+                    if usage:
+                        prompt_tokens = usage.prompt_tokens or 0
+                        completion_tokens = usage.completion_tokens or 0
+                        cost = estimate_cost(selected_model, prompt_tokens, completion_tokens)
+                        SESSION_COST_USD += cost
+                        # P2: additive, request-scoped accumulation for
+                        # trustworthy per-request cost attribution — does
+                        # not replace or affect the process-global budget
+                        # guard above. See src/observability/cost.py.
+                        add_request_cost(cost)
+
+                    # -------------------------------
+                    # Optional schema validation
+                    # -------------------------------
+                    result = text
+                    if response_schema:
+                        try:
+                            json_str = self._extract_json_block(text)
+                            result = response_schema.model_validate_json(json_str)
+                        except ValidationError:
+                            logger.warning(
+                                "[llm] Schema validation failed — returning raw text"
+                            )
+
+                    emit_event(
+                        "llm.completed", step="llm", status="success",
+                        duration_ms=elapsed(),
+                        metadata={
+                            "purpose": purpose,
+                            "model": selected_model,
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": (
+                                None if prompt_tokens is None
+                                else prompt_tokens + completion_tokens
+                            ),
+                            # None (not 0.0) when the provider gave no usage
+                            # data — this is "unknown", not "free".
+                            "estimated_cost_usd": cost,
+                            "retry_count": attempt - 1,
+                        },
+                    )
+                    return result
+
+                except Exception as e:
+                    last_error = e
+                    logger.warning(
+                        f"[llm] Error attempt={attempt}/{MAX_RETRIES}: {e}"
+                    )
+                    time.sleep(1.2 * attempt)
+
+            emit_event(
+                "llm.failed", step="llm", status="failure",
+                duration_ms=elapsed(),
+                metadata={
+                    "purpose": purpose,
+                    "model": selected_model,
+                    # Consistent with the success path's "attempt - 1":
+                    # retry_count counts attempts BEYOND the first, i.e.
+                    # actual retries, not total attempts made. MAX_RETRIES
+                    # (4) total attempts means 3 retries occurred.
+                    # Deliberately computed independently here rather than
+                    # reused from LLMExhaustedRetriesError.retry_count
+                    # below, which keeps its own P1-defined meaning
+                    # ("total attempts") — not touching that already
+                    # committed, separately-consumed value.
+                    "retry_count": MAX_RETRIES - 1,
+                    "error_type": type(last_error).__name__,
+                },
+            )
+            raise LLMExhaustedRetriesError(retry_count=MAX_RETRIES, last_error=last_error)
 
 # =============================================================================
 # SINGLETON INSTANCE

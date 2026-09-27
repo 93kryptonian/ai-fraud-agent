@@ -58,6 +58,7 @@ def detect_language(text: str) -> str:
         "Reply only with 'id' or 'en'.\n\n"
         f"{text}",
         temperature=0.0,
+        purpose="language_detection",
     ).strip().lower()
 
     return "id" if "id" in lang else "en"
@@ -97,6 +98,7 @@ def translate_id_to_en(text: str) -> str:
         "Translate the following text to English without adding new meaning:\n"
         f"{text}",
         temperature=0.0,
+        purpose="translation",
     ).strip()
 
 
@@ -106,6 +108,7 @@ def translate_en_to_id(text: str) -> str:
         "Translate the following text to Indonesian clearly and professionally:\n"
         f"{text}",
         temperature=0.0,
+        purpose="translation",
     ).strip()
 
 # =============================================================================
@@ -135,6 +138,7 @@ def rewrite_query(query: str) -> str:
     rewritten = llm.run(
         REWRITE_PROMPT.format(q=query),
         temperature=0.0,
+        purpose="query_rewrite",
     ).strip()
 
     # Remove accidental quotation artifacts
