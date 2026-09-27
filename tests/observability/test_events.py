@@ -195,15 +195,21 @@ def test_guardrails_completed_on_accepted_query(event_records):
 
     events = _parsed(event_records)
     names = [e["event"] for e in events]
-    # M5 adds language_detection/intent inside run_query() for the /query
-    # route — updated here from M4's shorter sequence, since this query now
-    # legitimately passes through the orchestrator's own instrumented
-    # stages, not because the guardrail/request wiring changed.
+    # M5 added language_detection/intent inside run_query() for the /query
+    # route. M6 further added analytics.sql(.failed, since there's no
+    # SUPABASE_DB_URL in tests)/analytics.completed for this same query,
+    # since it routes to analytics — updated here again from M5's shorter
+    # sequence, since this query now legitimately passes through those
+    # newly-instrumented stages too, not because the guardrail/request
+    # wiring itself changed. See tests/observability/test_m6_pipeline.py
+    # for the dedicated M6 coverage of analytics.sql/analytics.completed.
     assert names == [
         "request.started",
         "guardrails.completed",
         "language_detection.completed",
         "intent.completed",
+        "analytics.sql.failed",
+        "analytics.completed",
         "request.completed",
     ]
 
@@ -211,9 +217,6 @@ def test_guardrails_completed_on_accepted_query(event_records):
     assert guardrails_evt["status"] == "success"
     assert guardrails_evt["metadata"]["blocked"] is False
     assert guardrails_evt["metadata"]["reason"] is None
-
-    completed_evt = events[2]
-    assert completed_evt["status"] == "success"
 
 
 # =============================================================================
