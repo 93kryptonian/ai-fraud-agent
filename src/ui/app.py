@@ -102,7 +102,7 @@ def handle_query(query: str) -> dict:
     """
 
     # ---------------- Guardrails ----------------
-    is_valid, cleaned, lang = validate_query(query)
+    is_valid, cleaned, lang, _reason = validate_query(query)
 
     if not is_valid:
         return {
