@@ -14,7 +14,7 @@ This module coordinates workflows but contains no domain logic itself.
 
 import json
 import re
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from src.llm.llm_client import llm
 from src.llm.prompts import INTENT_CLASSIFICATION_PROMPT
@@ -28,7 +28,8 @@ from src.rag.question_rewrite import (
     translate_en_to_id,
 )
 from src.rag.insight_layer import generate_insight
-from src.observability.timing import observe_step
+from src.observability.events import emit_event
+from src.observability.timing import elapsed_timer, observe_step
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -109,7 +110,7 @@ def detect_intent_llm(query: str) -> Tuple[str, str]:
     resp = None
     try:
         prompt = INTENT_CLASSIFICATION_PROMPT.format(q=query)
-        resp = llm.run(prompt, temperature=0.0)
+        resp = llm.run(prompt, temperature=0.0, purpose="intent_classification")
         data = json.loads(llm._extract_json_block(str(resp)))
         intent = data.get("intent", "rag")
         lang = data.get("language", "en")
@@ -129,22 +130,35 @@ def detect_intent_llm(query: str) -> Tuple[str, str]:
     return intent, lang
 
 
-def detect_intent(query: str, detected_lang: str) -> Tuple[str, str]:
+def detect_intent(
+    query: str, detected_lang: str
+) -> Tuple[str, str, Optional[float], str]:
     """
     Hybrid intent detection strategy.
 
     1. Heuristic detection
     2. High confidence → accept
     3. Low confidence → defer to LLM
+
+    Returns:
+        intent, lang, confidence, method
+
+    confidence is the heuristic's own numeric score when that path was
+    used ("heuristic"), or None when resolved via the LLM path — there is
+    no comparable real confidence number from detect_intent_llm, and
+    inventing one would violate the same "don't fake a number" rule used
+    elsewhere (e.g. duration_ms staying None rather than 0 for an
+    unmeasured stage). method (M6) exists so the intent.completed event
+    can say which path actually decided the route.
     """
     intent_h, conf = detect_intent_heuristic(query)
     logger.info(f"[intent] heuristic intent={intent_h} conf={conf:.2f}")
 
     if conf >= 0.80:
-        return intent_h, detected_lang
+        return intent_h, detected_lang, conf, "heuristic"
 
     intent_l, lang_l = detect_intent_llm(query)
-    return intent_l, lang_l or detected_lang
+    return intent_l, lang_l or detected_lang, None, "llm"
 
 # =============================================================================
 # MAIN ORCHESTRATION PIPELINE
@@ -183,8 +197,40 @@ def run_query(raw_query: str, detected_lang: str = None) -> Dict[str, Any]:
     # ------------------------------------------------------------------
     # 3. Intent detection
     # ------------------------------------------------------------------
-    with observe_step("intent"):
-        intent, user_lang = detect_intent(query, user_lang)
+    # Not observe_step() here (unlike language_detection above): intent
+    # has real metadata worth reporting (intent/confidence/method/route,
+    # per the M6 design review), and observe_step is deliberately "boring"
+    # — no metadata parameter, by design (M5) — so a stage that needs to
+    # say more than success/failure emits its own event explicitly,
+    # the same pattern already used for guardrails/request/retrieval.
+    with elapsed_timer() as intent_elapsed:
+        try:
+            intent, user_lang, intent_confidence, intent_method = detect_intent(
+                query, user_lang
+            )
+        except Exception as e:
+            emit_event(
+                "intent.failed", step="intent", status="failure",
+                duration_ms=intent_elapsed(),
+                metadata={"error_type": type(e).__name__},
+            )
+            raise
+        emit_event(
+            "intent.completed", step="intent", status="success",
+            duration_ms=intent_elapsed(),
+            metadata={
+                "intent": intent,
+                "confidence": intent_confidence,
+                "method": intent_method,
+                # "route" and "intent" are the same value in this codebase
+                # today — intent literally *is* the routing decision here,
+                # there's no separate routing layer downstream of it. Kept
+                # as its own field to match the contract's schema, which
+                # was written generically enough to allow the two to
+                # differ in a more complex system.
+                "route": intent,
+            },
+        )
     logger.info(
         f"[orchestrator] intent={intent} | lang={user_lang} | query={query!r}"
     )
