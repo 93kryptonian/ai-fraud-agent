@@ -28,6 +28,7 @@ from src.rag.question_rewrite import (
     translate_en_to_id,
 )
 from src.rag.insight_layer import generate_insight
+from src.observability.timing import observe_step
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -168,15 +169,22 @@ def run_query(raw_query: str, detected_lang: str = None) -> Dict[str, Any]:
     # ------------------------------------------------------------------
     # 2. Language detection
     # ------------------------------------------------------------------
+    # observe_step sits inside the existing try/except, not around it:
+    # if detect_language fails, it still emits language_detection.failed
+    # (with real duration) and re-raises, and the fallback to "en" below
+    # is completely unchanged — timing infrastructure must not alter
+    # application behavior (M5).
     try:
-        user_lang = detect_language(query)
+        with observe_step("language_detection"):
+            user_lang = detect_language(query)
     except Exception:
         user_lang = "en"
 
     # ------------------------------------------------------------------
     # 3. Intent detection
     # ------------------------------------------------------------------
-    intent, user_lang = detect_intent(query, user_lang)
+    with observe_step("intent"):
+        intent, user_lang = detect_intent(query, user_lang)
     logger.info(
         f"[orchestrator] intent={intent} | lang={user_lang} | query={query!r}"
     )

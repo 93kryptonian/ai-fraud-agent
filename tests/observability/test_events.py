@@ -195,7 +195,17 @@ def test_guardrails_completed_on_accepted_query(event_records):
 
     events = _parsed(event_records)
     names = [e["event"] for e in events]
-    assert names == ["request.started", "guardrails.completed", "request.completed"]
+    # M5 adds language_detection/intent inside run_query() for the /query
+    # route — updated here from M4's shorter sequence, since this query now
+    # legitimately passes through the orchestrator's own instrumented
+    # stages, not because the guardrail/request wiring changed.
+    assert names == [
+        "request.started",
+        "guardrails.completed",
+        "language_detection.completed",
+        "intent.completed",
+        "request.completed",
+    ]
 
     guardrails_evt = events[1]
     assert guardrails_evt["status"] == "success"

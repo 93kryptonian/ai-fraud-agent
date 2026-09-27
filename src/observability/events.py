@@ -1,6 +1,6 @@
 # src/observability/events.py
 """
-Structured events (M4).
+Structured events (M4, timing added in M5).
 
 This is a machine-readable event contract, not a logging convenience. It is
 deliberately a separate stream from src/utils/logger.py (M3): that logger is
@@ -9,16 +9,30 @@ parse, aggregate, or trace these records. Conflating the two would mean
 either breaking the human-readable format or growing every human log line
 a metadata blob nobody reads.
 
-Scope, per docs/observability-contract.md and the M4 design review:
+Scope, per docs/observability-contract.md and the M4/M5 design reviews:
 - request.started / request.completed (request lifecycle)
 - guardrails.completed / guardrails.blocked (the decision boundary)
-Nothing else yet. No timing (M5 owns duration_ms — always None here, never
-faked as 0), no LLM/RAG telemetry (M6), no OpenTelemetry (explicit non-goal).
+- language_detection.completed/failed, intent.completed/failed (M5)
+Nothing else yet. No LLM/RAG telemetry (M6), no OpenTelemetry (explicit
+non-goal).
 
-request.completed represents *normal* endpoint completion only. If a
-request raises an unhandled exception before reaching that point, no
-request.completed is emitted for it today — that's an M5/M6 concern
-(request/stage failure semantics), not silently patched over here.
+duration_ms (M5): this module never computes it — see
+src/observability/timing.py for that. It stays None for start-marker
+events (request.started) and anything not yet instrumented; never faked
+as 0, which would falsely claim a measured-but-instant execution.
+
+request.completed(status=success) means the HTTP handler completed its
+normal execution contract — it does NOT assert that the business
+operation inside it (RAG answer, analytics result, ...) succeeded. A
+pipeline function that catches its own exception and returns an
+{"error": ...} dict still produces a normal, non-raising return here. M5
+deliberately does NOT infer or expose a business-outcome field from that;
+see the M5 design notes for why, and M6 for where that belongs.
+
+Exactly one request.completed is emitted per request as of M5, including
+on an unhandled exception (status="error", then the exception is
+re-raised — this module and its callers never swallow one just to
+observe it).
 """
 
 import hashlib
@@ -82,12 +96,18 @@ def emit_event(
     step: str,
     status: str,
     metadata: Optional[Dict[str, Any]] = None,
+    duration_ms: Optional[int] = None,
 ) -> Event:
     """
     Build and emit one structured event, tagged with the request_id bound
     to the current execution context (M3). Returns the Event for callers
     that want to inspect what was just emitted (e.g. tests) — emitting
     always happens as a side effect; this is not a query.
+
+    duration_ms (M5): the caller's job to compute (see
+    src/observability/timing.py) and pass in — this function does not
+    time anything itself. Left as None for a start-marker event (e.g.
+    request.started) or any stage not yet instrumented with timing.
     """
     evt = Event(
         schema_version=SCHEMA_VERSION,
@@ -96,7 +116,7 @@ def emit_event(
         event=event,
         step=step,
         status=status,
-        duration_ms=None,
+        duration_ms=duration_ms,
         metadata=metadata or {},
     )
     _events_logger.info(json.dumps(asdict(evt), default=str))
