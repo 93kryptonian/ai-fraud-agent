@@ -21,6 +21,8 @@ from typing import Dict, Any, List
 from src.rag.retriever_direct import retrieve_top_k
 from src.llm.llm_client import llm
 from src.db.supabase_client import DB
+from src.observability.events import emit_event
+from src.observability.timing import elapsed_timer
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -154,7 +156,28 @@ def merchant_inference_mode(
     """
 
     patterns = [f".*{re.escape(k)}.*" for k in keyword_filter]
-    rows = db_client.sql(sql, (patterns,))
+
+    with elapsed_timer() as elapsed:
+        try:
+            rows = db_client.sql(sql, (patterns,))
+        except Exception as e:
+            emit_event(
+                "retrieval.failed", step="retrieval", status="failure",
+                duration_ms=elapsed(),
+                metadata={"retrieval_method": "merchant_inference", "error_type": type(e).__name__},
+            )
+            raise
+
+        emit_event(
+            "retrieval.completed",
+            step="retrieval", status="success",
+            duration_ms=elapsed(),
+            metadata={
+                "retrieval_method": "merchant_inference",
+                "candidate_count": len(rows),
+                "selected_count": len(rows),  # no reranking in this path
+            },
+        )
 
     if not rows:
         return {
@@ -212,7 +235,7 @@ INSTRUCTIONS:
     # ---------------------------------------------------------
     # Step 4 — LLM inference
     # ---------------------------------------------------------
-    answer = llm_client.run(prompt, temperature=0.0)
+    answer = llm_client.run(prompt, temperature=0.0, purpose="merchant_inference")
 
     return {
         "type": "rag",
@@ -249,7 +272,7 @@ def run_rag(query_en: str, user_lang: str) -> Dict[str, Any]:
     context_text = build_context(chunks)
     prompt = build_prompt(query_en, context_text, user_lang)
 
-    answer = llm.run(prompt, temperature=0.0)
+    answer = llm.run(prompt, temperature=0.0, purpose="rag_answer")
 
     return {
         "type": "rag",

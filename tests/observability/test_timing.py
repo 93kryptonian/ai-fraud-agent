@@ -24,8 +24,12 @@ Covers the locked M5 contract:
 7. business_outcome is explicitly NOT introduced in M5 (deferred to M6,
    per the design review) — locking that decision with a test so a future
    accidental addition shows up as a diff here, not a silent scope creep.
-8. Retrieval/ranking/LLM/analytics internals remain uninstrumented (M6),
-   extending M4's same discipline check.
+
+(A former item 8 here locked "retrieval/ranking/LLM/analytics internals
+remain uninstrumented" as an M5 scope boundary. M6 was built explicitly to
+add that instrumentation — see tests/observability/test_m6_pipeline.py —
+so that test was removed rather than left permanently failing; the M6
+tests lock the next boundary instead.)
 """
 
 import json
@@ -237,13 +241,7 @@ def test_business_outcome_field_not_introduced_in_m5(event_records):
 # 8. Still uninstrumented: retrieval, ranking, LLM, analytics internals
 # =============================================================================
 
-def test_no_timing_for_stages_not_yet_owned_by_m5(event_records):
-    from fastapi.testclient import TestClient
-    from api.main import app
-
-    client = TestClient(app)
-    client.post("/query", json={"query": "what is the fraud rate trend"})
-
-    names = {e["event"] for e in _parsed(event_records)}
-    for forbidden in ("retrieval", "ranking", "llm", "analytics"):
-        assert not any(n.startswith(forbidden) for n in names), names
+# The M5 version of this test asserted retrieval/ranking/llm/analytics
+# events never appeared. M6 (tests/observability/test_m6_pipeline.py) was
+# built specifically to add them, so that assertion is gone rather than
+# left permanently failing — see the module docstring above.

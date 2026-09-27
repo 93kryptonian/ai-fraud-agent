@@ -182,7 +182,11 @@ def _rerank_by_llm(
             query=query,
             chunk=c["content"],
         )
-        resp = llm.run(prompt, temperature=0.0)
+        # Note: unreachable in production — retrieve_top_k() always calls
+        # rerank_chunks(..., use_llm=False), confirmed by repo-wide grep
+        # during M6 design. purpose is still tagged correctly in case a
+        # future caller enables this path.
+        resp = llm.run(prompt, temperature=0.0, purpose="llm_rerank")
 
         try:
             score = float(resp.strip())
