@@ -19,12 +19,22 @@ Design principles:
 """
 
 import re
-from typing import Optional, Tuple
+from typing import Literal, Optional, Tuple
 
 from src.utils.logger import get_logger
 from src.rag.question_rewrite import detect_language
 
 logger = get_logger(__name__)
+
+# =============================================================================
+# MACHINE-READABLE REJECTION REASONS (M4)
+# =============================================================================
+# Stable codes for the observability layer. Deliberately separate from the
+# human-facing message strings below: the two are independent
+# representations of the same decision, and the event layer must never
+# infer a reason by parsing a translated sentence. See
+# docs/observability-contract.md §4/§6.
+GuardrailReason = Literal["too_short", "noise", "injection", "out_of_domain"]
 
 # =============================================================================
 # CONFIGURATION
@@ -153,14 +163,20 @@ def is_domain_related(query: str) -> bool:
 # MAIN ENTRYPOINT
 # =============================================================================
 
-def validate_query(text: str) -> Tuple[bool, Optional[str], Optional[str]]:
+def validate_query(
+    text: str,
+) -> Tuple[bool, Optional[str], Optional[str], Optional[GuardrailReason]]:
     """
     Validate user input for safety and domain relevance.
 
     Returns:
-        (is_valid, cleaned_text_or_error_message, detected_language)
+        (is_valid, cleaned_text_or_error_message, detected_language, reason)
 
     detected_language ∈ {"en", "id"}
+    reason is None when is_valid is True, otherwise one of GuardrailReason —
+    a stable, machine-readable code for the observability layer (M4). It is
+    intentionally independent of the human-facing message: callers building
+    telemetry must use `reason`, never infer one by parsing the message.
     """
     lang = detect_language(text)
 
@@ -169,7 +185,7 @@ def validate_query(text: str) -> Tuple[bool, Optional[str], Optional[str]]:
     # -------------------------------------------------
     if not text or too_short(text):
         msg = "Query too short." if lang == "en" else "Pertanyaan terlalu pendek."
-        return False, msg, lang
+        return False, msg, lang, "too_short"
 
     if contains_only_noise(text):
         msg = (
@@ -177,7 +193,7 @@ def validate_query(text: str) -> Tuple[bool, Optional[str], Optional[str]]:
             if lang == "en"
             else "Pertanyaan tidak memiliki konteks yang jelas."
         )
-        return False, msg, lang
+        return False, msg, lang, "noise"
 
     # -------------------------------------------------
     # 2. Prompt-injection attempts
@@ -188,7 +204,7 @@ def validate_query(text: str) -> Tuple[bool, Optional[str], Optional[str]]:
             if lang == "en"
             else "Terdeteksi upaya prompt injection."
         )
-        return False, msg, lang
+        return False, msg, lang, "injection"
 
     # -------------------------------------------------
     # 3. Domain restriction (fraud-only)
@@ -202,7 +218,7 @@ def validate_query(text: str) -> Tuple[bool, Optional[str], Optional[str]]:
             "Maaf, saya hanya dapat menjawab pertanyaan terkait fraud, kejahatan finansial, "
             "atau dokumen yang tersedia."
         )
-        return False, msg, lang
+        return False, msg, lang, "out_of_domain"
 
     # -------------------------------------------------
     # 4. Sanitization
@@ -210,4 +226,4 @@ def validate_query(text: str) -> Tuple[bool, Optional[str], Optional[str]]:
     cleaned = clean_whitespace(text)
     cleaned = trim_overlong(cleaned)
 
-    return True, cleaned, lang
+    return True, cleaned, lang, None

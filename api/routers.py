@@ -6,12 +6,15 @@ Responsibilities:
 - Define public API endpoints
 - Assign a request_id to every incoming request (M3 observability context),
   before anything else runs, so even a guardrail rejection is correlatable
+- Emit the request/guardrail structured events (M4) at the actual decision
+  boundary — based on validate_query()'s return value, not by relying on
+  guardrails.py's own (incomplete) internal logging
 - Validate request schemas
 - Enforce input guardrails (safety/domain) before delegating
 - Delegate execution to application services
 
 This module intentionally contains no domain reasoning logic — only
-request validation and guardrail enforcement live here.
+request validation, guardrail enforcement, and event emission live here.
 """
 
 from fastapi import APIRouter
@@ -24,8 +27,36 @@ from src.analytics.fraud_analytics import run_analytics
 from src.safety.guardrails import validate_query
 from src.llm.response_schema import ErrorResponse
 from src.observability.context import new_request_id, set_request_id
+from src.observability.events import emit_event, query_hash
 
 router = APIRouter(prefix="", tags=["api"])
+
+
+def _run_guardrails(route: str, query: str):
+    """
+    Shared guardrail + event-emission sequence for all three endpoints.
+
+    Emits, in order: request.started, then guardrails.completed or
+    guardrails.blocked. Returns the same 4-tuple validate_query() does, so
+    each endpoint's existing branching logic is unchanged.
+    """
+    emit_event("request.started", step="request", status="success", metadata={"route": route})
+
+    ok, cleaned_or_msg, lang, reason = validate_query(query)
+
+    emit_event(
+        "guardrails.blocked" if not ok else "guardrails.completed",
+        step="guardrails",
+        status="blocked" if not ok else "success",
+        metadata={
+            "blocked": not ok,
+            "reason": reason,
+            "query_length": len(query or ""),
+            "query_hash": query_hash(query or ""),
+        },
+    )
+
+    return ok, cleaned_or_msg, lang, reason
 
 
 @router.post("/query", summary="Run unified AI query")
@@ -39,8 +70,9 @@ async def query_endpoint(req: QueryRequest):
     """
     set_request_id(new_request_id())
 
-    ok, cleaned_or_msg, lang = validate_query(req.query)
+    ok, cleaned_or_msg, lang, _reason = _run_guardrails("/query", req.query)
     if not ok:
+        emit_event("request.completed", step="request", status="blocked", metadata={"route": "/query"})
         return {
             "query": req.query,
             "intent": "reject",
@@ -48,7 +80,9 @@ async def query_endpoint(req: QueryRequest):
             "result": {"type": "reject", "message": cleaned_or_msg},
         }
 
-    return run_query(cleaned_or_msg, detected_lang=lang)
+    result = run_query(cleaned_or_msg, detected_lang=lang)
+    emit_event("request.completed", step="request", status="success", metadata={"route": "/query"})
+    return result
 
 
 @router.post("/rag", summary="Run Retrieval-Augmented Generation (RAG)")
@@ -65,17 +99,20 @@ async def rag_endpoint(req: RAGRequest):
     """
     set_request_id(new_request_id())
 
-    ok, cleaned_or_msg, _ = validate_query(req.query)
+    ok, cleaned_or_msg, _lang, _reason = _run_guardrails("/rag", req.query)
     if not ok:
+        emit_event("request.completed", step="request", status="blocked", metadata={"route": "/rag"})
         return JSONResponse(
             status_code=400,
             content=ErrorResponse(error=cleaned_or_msg).model_dump(),
         )
 
-    return run_rag(
+    result = run_rag(
         query_en=cleaned_or_msg,
         user_lang=req.lang,
     )
+    emit_event("request.completed", step="request", status="success", metadata={"route": "/rag"})
+    return result
 
 
 @router.post("/analytics", summary="Run fraud analytics query")
@@ -90,14 +127,17 @@ async def analytics_endpoint(req: AnalyticsRequest):
     """
     set_request_id(new_request_id())
 
-    ok, cleaned_or_msg, _ = validate_query(req.query)
+    ok, cleaned_or_msg, _lang, _reason = _run_guardrails("/analytics", req.query)
     if not ok:
+        emit_event("request.completed", step="request", status="blocked", metadata={"route": "/analytics"})
         return JSONResponse(
             status_code=400,
             content=ErrorResponse(error=cleaned_or_msg).model_dump(),
         )
 
-    return run_analytics(
+    result = run_analytics(
         cleaned_or_msg,
         lang=req.lang,
     )
+    emit_event("request.completed", step="request", status="success", metadata={"route": "/analytics"})
+    return result
