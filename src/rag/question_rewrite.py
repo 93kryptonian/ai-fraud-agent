@@ -157,7 +157,20 @@ def process_query(original_query: str) -> Tuple[str, Dict]:
     5. Return final query + metadata
     """
     query = original_query.strip()
-    lang = detect_language(query)
+
+    # P1 note: llm.run() now raises LLMExhaustedRetriesError instead of
+    # returning a fake-success sentinel string once retries are exhausted
+    # (src/llm/llm_client.py). Every call in this function that reaches the
+    # LLM is therefore wrapped locally so this module stays self-contained
+    # and CI-safe on its own — matching this module's own stated design
+    # principle ("Conservative by default") — rather than relying on every
+    # caller to happen to wrap it, which P1 showed wasn't actually true
+    # (a direct call to process_query(), or the Indonesian-translation
+    # branch specifically, wasn't protected before this fix).
+    try:
+        lang = detect_language(query)
+    except Exception:
+        lang = "en"
 
     meta: Dict = {
         "lang": lang,
@@ -169,8 +182,13 @@ def process_query(original_query: str) -> Tuple[str, Dict]:
 
     # Step 1 — translation (retriever operates in English)
     if lang == "id":
-        query_en = translate_id_to_en(query)
-        meta["translated"] = True
+        try:
+            query_en = translate_id_to_en(query)
+            meta["translated"] = True
+        except Exception:
+            # Fail closed to the original text rather than crashing the
+            # whole pipeline over a translation failure.
+            query_en = query
     else:
         query_en = query
 
@@ -189,8 +207,13 @@ def process_query(original_query: str) -> Tuple[str, Dict]:
         return query_en, meta
 
     # Step 4 — controlled rewrite
-    rewritten = rewrite_query(query_en)
-    meta["rewritten"] = True
-    meta["final_query_en"] = rewritten
-
-    return rewritten, meta
+    try:
+        rewritten = rewrite_query(query_en)
+        meta["rewritten"] = True
+        meta["final_query_en"] = rewritten
+        return rewritten, meta
+    except Exception:
+        # Conservative by default: if rewriting fails, use the
+        # (unrewritten) query rather than crashing the pipeline.
+        meta["final_query_en"] = query_en
+        return query_en, meta
