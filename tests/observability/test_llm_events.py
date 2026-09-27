@@ -159,6 +159,44 @@ def test_llm_failed_is_exactly_one_event_not_one_per_attempt(event_records, monk
     assert evt["metadata"]["purpose"] == "rag_answer"
 
 
+def test_every_real_llm_run_call_site_is_purpose_tagged():
+    """
+    Regression lock: a live trace (not a mocked test) once caught a real
+    llm.run() call site (src/rag/insight_layer.py's generate_insight)
+    that was missed during M6.3 and silently fell back to
+    purpose="unspecified". Scans the actual source for every real call
+    (not comment text mentioning "llm.run()") and asserts each one passes
+    an explicit purpose= within a reasonable distance of the call —
+    cheaper and more reliable than trying to enumerate every call site by
+    hand again.
+    """
+    import re
+    import pathlib
+
+    src_root = pathlib.Path(__file__).resolve().parents[2] / "src"
+    call_pattern = re.compile(r"\bllm(?:_client)?\.run\s*\(")
+    untagged = []
+
+    for path in src_root.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for match in call_pattern.finditer(text):
+            # Skip matches inside comments/docstrings mentioning "llm.run()"
+            # as text rather than calling it — heuristic: a real call is
+            # immediately followed by an argument or a newline+indent
+            # leading into one, within the enclosing parens; a comment
+            # reference is preceded on its own line by "#".
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line = text[line_start:text.find("\n", match.start())]
+            if line.lstrip().startswith("#"):
+                continue
+            window = text[match.start():match.start() + 400]
+            if "purpose=" not in window:
+                lineno = text[:match.start()].count("\n") + 1
+                untagged.append(f"{path.relative_to(src_root.parent)}:{lineno}")
+
+    assert untagged == [], f"llm.run() call site(s) missing purpose=: {untagged}"
+
+
 def test_llm_fallback_event_on_budget_threshold(event_records, monkeypatch):
     import src.llm.llm_client as llm_client_module
 
