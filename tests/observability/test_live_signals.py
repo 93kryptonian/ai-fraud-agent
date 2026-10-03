@@ -294,7 +294,7 @@ def test_emit_event_does_not_know_about_the_live_adapter():
     assert "observability.live" not in text and "LiveSignals" not in text
 
 
-def test_no_endpoint_is_registered_yet():
+def test_default_app_exposes_no_signals_or_metrics_endpoint():
     from api.main import app
 
     paths = set(app.openapi()["paths"])
