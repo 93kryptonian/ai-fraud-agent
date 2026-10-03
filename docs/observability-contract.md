@@ -345,9 +345,28 @@ Rules:
   `BadRequestError`, `NotFoundError`, `PermissionDeniedError`,
   `APIStatusError`, `ProgrammingError`, the psycopg2 SQLSTATE subclasses,
   `SupabaseException`, `JSONDecodeError`, `ValidationError`.
-  The PostgREST/httpx entries were established against the installed client
-  versions; the pinned versions have not yet been verified (pre-publish
-  check). `ConnectionError`, `TimeoutError` and `OSError` have no known
+  **Verified against the repository's pinned dependencies** (Python 3.11,
+  `postgrest==0.16.11`, `httpx==0.27.2`, `psycopg2-binary==2.9.9`,
+  `openai==2.8.1`, installed from `requirements.txt` in an isolated
+  environment). With the pinned PostgREST client, `execute()` makes its HTTP
+  call outside any exception wrapping, so transport errors reach
+  `retrieval.failed` as raw httpx classes, and an error response raises
+  `APIError`. Observed against the pinned client:
+
+  | Condition | Exception raised |
+  |---|---|
+  | connection refused | `httpx.ConnectError` |
+  | PostgREST 404 JSON error | `postgrest.exceptions.APIError` |
+  | read timeout | `httpx.ReadTimeout` |
+  | connect timeout | `httpx.ConnectTimeout` |
+
+  On the same pins psycopg2 names a `statement_timeout` (SQLSTATE `57014`)
+  `QueryCanceled` (a subclass of `OperationalError`), and httpx's `ConnectError`
+  and `ReadTimeout` are not subclasses of the built-in `ConnectionError` and
+  `TimeoutError`, which is why they need their own entries. The OpenAI classes
+  (`AuthenticationError`, `InternalServerError`) exist on the pinned SDK. The
+  `QueryCanceled` path was verified by class mapping, not reproduced against a
+  live database. `ConnectionError`, `TimeoutError` and `OSError` have no known
   production source and remain only because tests use them.
 - **`model`, `from_model`, `to_model`** are bounded to priced or configured
   models, else `other`.
