@@ -17,6 +17,7 @@ production use, replace with a shared store (Redis) — see
 docs/operations.md.
 """
 
+import os
 import time
 from collections import defaultdict
 from typing import Dict, Tuple
@@ -28,6 +29,25 @@ from starlette.responses import JSONResponse
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# Behind a reverse proxy (Render) request.client.host is the proxy, so every
+# user would share one bucket. When TRUST_FORWARDED_FOR=true we read the
+# client from X-Forwarded-For, counting from the RIGHT: each trusted proxy
+# appends the address it saw, so the entry TRUSTED_PROXY_HOPS from the end is
+# the real client. The leftmost entry is client-controlled and spoofable.
+TRUST_FORWARDED_FOR = os.getenv("TRUST_FORWARDED_FOR", "false").lower() == "true"
+TRUSTED_PROXY_HOPS = max(1, int(os.getenv("TRUSTED_PROXY_HOPS", "1")))
+
+
+def get_client_ip(request: Request) -> str:
+    if TRUST_FORWARDED_FOR:
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            parts = [p.strip() for p in xff.split(",") if p.strip()]
+            if parts:
+                return parts[-min(TRUSTED_PROXY_HOPS, len(parts))]
+    return request.client.host if request.client else "unknown"
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -44,7 +64,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         try:
-            client_ip = request.client.host if request.client else "unknown"
+            client_ip = get_client_ip(request)
             now = time.time()
             window_start, count = self._buckets[client_ip]
 

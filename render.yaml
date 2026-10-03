@@ -16,6 +16,11 @@ services:
       - key: SUPABASE_DB_URL
         sync: false
 
+      # Render terminates TLS in front of the app: use X-Forwarded-For for
+      # per-client rate limiting (1 trusted proxy hop).
+      - key: TRUST_FORWARDED_FOR
+        value: "true"
+
       # Optional defaults
       - key: DEFAULT_MODEL
         value: gpt-4o-mini
