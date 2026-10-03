@@ -133,6 +133,42 @@ Failure is treated as a **first-class design concern**, not an edge case.
 
 ---
 
+### 4.3 Merchant / Category Questions Without a SQL Answer
+
+**Scenario:**
+- Ranking questions ("which merchants have the highest fraud incidence?")
+  are routed to analytics and answered from SQL over `fraud_transactions`.
+  The former document-wide LLM "merchant inference" path was removed
+  (token-expensive and not verifiable). If SQL returns no rows or fails,
+  there is intentionally no LLM fallback.
+
+**Detection:**
+- `analytics.sql.failed` / empty result (`row_count = 0`)
+
+**Response:**
+- "Insufficient data" answer (confidence 0.0), with the attempted SQL
+  returned in `sql` when one was executed
+- No fabricated answer from documents
+- A cheaper document-based approach may be added later if needed
+
+---
+
+### 4.4 Retriever Unavailable vs. Nothing Relevant
+
+**Scenario:**
+- Vector search is disabled/failing, or simply finds nothing
+
+**Detection:**
+- `retrieval_status` in the RAG result: `ok | empty | unavailable`
+  (plus the `retrieval.*` events)
+
+**Response:**
+- No LLM call is made without context
+- `unavailable` → "search temporarily unavailable"; `empty` → "documents
+  do not provide enough information"
+
+---
+
 ## 5. Model-Level Failures
 
 ### 5.1 Hallucination Risk

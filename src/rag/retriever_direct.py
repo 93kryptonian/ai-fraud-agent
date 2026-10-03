@@ -14,7 +14,7 @@ Design principles:
 """
 
 import os
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 from src.utils.logger import get_logger
 from src.db.supabase_client import get_supabase
@@ -41,6 +41,16 @@ def retrieve_top_k(
     top_k: int = 5,
     source_name: Optional[str] = None,
 ) -> List[Dict]:
+    """Retrieve top-k chunks (rows only). See retrieve_top_k_with_status."""
+    rows, _status = retrieve_top_k_with_status(query, top_k, source_name)
+    return rows
+
+
+def retrieve_top_k_with_status(
+    query: str,
+    top_k: int = 5,
+    source_name: Optional[str] = None,
+) -> Tuple[List[Dict], str]:
     """
     Retrieve top-k document chunks from Supabase.
 
@@ -50,7 +60,11 @@ def retrieve_top_k(
     - Errors are logged and swallowed (safe fallback)
 
     Returns:
-        List of dicts containing:
+        (rows, status) where status is "ok" | "empty" | "unavailable" so
+        callers can tell an outage/disabled retriever from a genuine
+        "nothing relevant found".
+
+        rows: list of dicts containing:
         - content
         - source_name
         - page
@@ -82,7 +96,7 @@ def retrieve_top_k(
                 "candidate_count": 0, "selected_count": 0, "source_filter": source_name,
             },
         )
-        return []
+        return [], "unavailable"
 
     with elapsed_timer() as elapsed:
         # ------------------------------------------------------------------
@@ -102,7 +116,7 @@ def retrieve_top_k(
                     "source_filter": source_name,
                 },
             )
-            return []
+            return [], "unavailable"
 
         # ------------------------------------------------------------------
         # QUERY EMBEDDING
@@ -121,7 +135,7 @@ def retrieve_top_k(
                     "candidate_count": 0, "selected_count": 0, "source_filter": source_name,
                 },
             )
-            return []
+            return [], "unavailable"
 
         # ------------------------------------------------------------------
         # VECTOR SEARCH (pgvector via match_documents RPC)
@@ -149,7 +163,7 @@ def retrieve_top_k(
                     "source_filter": source_name,
                 },
             )
-            return []
+            return [], "unavailable"
 
         emit_event(
             "retrieval.completed", step="retrieval", status="success",
@@ -169,7 +183,7 @@ def retrieve_top_k(
             "ranking.skipped", step="ranking", status="skipped",
             metadata={"candidate_count": 0, "selected_count": 0},
         )
-        return []
+        return [], "empty"
 
     # ------------------------------------------------------------------
     # HYBRID RERANK — a separate stage, own try/except, so a bug in
@@ -188,7 +202,7 @@ def retrieve_top_k(
             )
             # Fail closed: no ranked results rather than crashing the
             # whole RAG request over a ranking bug.
-            return []
+            return [], "unavailable"
 
         logger.info(
             f"[retriever_direct] Retrieved {len(candidates)} candidates → {len(rows)} chunks"
@@ -202,4 +216,4 @@ def retrieve_top_k(
                 "reranker": "hybrid",  # use_llm=False always in production — see ranking.py
             },
         )
-        return rows
+        return rows, "ok"
