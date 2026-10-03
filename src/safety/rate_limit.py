@@ -9,6 +9,9 @@ Design principles:
   on a single-process demo deployment
 - Fails open on internal errors (never blocks legitimate traffic due to
   a bug in the limiter itself)
+- Observable (M8.4): a blocked request emits one bounded
+  `rate_limit.blocked` event labelled by route only. Telemetry never changes
+  the limiter's decision: a failure while recording a block still returns 429.
 
 Known limitation:
 State is per-process. Behind multiple Render instances/workers this
@@ -20,12 +23,13 @@ docs/operations.md.
 import os
 import time
 from collections import defaultdict
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from src.observability.events import emit_event
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -48,6 +52,55 @@ def get_client_ip(request: Request) -> str:
             if parts:
                 return parts[-min(TRUSTED_PROXY_HOPS, len(parts))]
     return request.client.host if request.client else "unknown"
+
+
+# Bounded route domain for rate_limit.blocked events (same values as the
+# request events' `route`, plus "other"). The raw path is mapped HERE, before
+# any event is built, so no event ever carries a raw path.
+_APPLICATION_ROUTES = frozenset({"/query", "/rag", "/analytics"})
+# Telemetry/control-plane endpoints are not application traffic (M8.2/M8.3
+# self-exclusion): a throttled scraper must not inflate the "other" bucket.
+_CONTROL_PLANE_ROUTES = frozenset({"/signals", "/metrics"})
+OTHER_ROUTE = "other"
+
+
+def map_route(path: str) -> Optional[str]:
+    """
+    Raw request path -> bounded route for rate_limit.blocked, or None when no
+    event should be emitted (control-plane paths). Exact match with a
+    trailing slash tolerated; everything else is "other".
+    """
+    normalized = path.rstrip("/") or "/"
+    if normalized in _CONTROL_PLANE_ROUTES:
+        return None
+    if normalized in _APPLICATION_ROUTES:
+        return normalized
+    return OTHER_ROUTE
+
+
+def _record_block(path: str, count: int) -> None:
+    """
+    Log and emit for one blocked request. Never raises: a telemetry failure
+    must not change the limiter's decision (the caller still returns 429).
+    Deliberately records no client identifier (no IP, hash or key): the raw
+    client address is held in memory only (contract §6).
+    """
+    try:
+        route = map_route(path)
+        # Control-plane paths still get a log line (operators want to know a
+        # scraper is throttled) but no event: they are not application traffic.
+        logger.warning(f"[rate_limit] Blocked route={route or 'control_plane'} count={count}")
+        if route is None:
+            return
+        emit_event(
+            "rate_limit.blocked", step="rate_limit", status="blocked",
+            metadata={"route": route},
+        )
+    except Exception:
+        try:
+            logger.exception("[rate_limit] Failed to record blocked request")
+        except Exception:
+            pass
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -76,7 +129,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
             if count > self.requests_per_window:
                 retry_after = max(0, int(self.window_seconds - (now - window_start)))
-                logger.warning(f"[rate_limit] Blocked ip={client_ip} count={count}")
+                _record_block(request.url.path, count)
                 return JSONResponse(
                     status_code=429,
                     content={

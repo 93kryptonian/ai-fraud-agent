@@ -4,7 +4,7 @@ Status: **reconciled after M6, updated for M7.1.** M6 is implemented and
 frozen at `513f4b4`. Sections marked **[implemented]** describe what the code
 emits today (M7.1 request-level cost is implemented, §8). Sections marked
 **[design-only]** describe M7 design direction; nothing in them is
-implemented yet. (M7.2 dimension policy, §9, M7.3 operational signals, §13, the M8.1 live feed, the M8.2 `/signals` endpoint and the M8.3 `/metrics` exposition, §14, are implemented.)
+implemented yet. (M7.2 dimension policy, §9, M7.3 operational signals, §13, the M8.1 live feed, the M8.2 `/signals` endpoint, the M8.3 `/metrics` exposition and the M8.4 `rate_limit.blocked` event, §14, are implemented.)
 
 This document began as the M2 contract. It has been reconciled against the
 actual code: events the M2 text promised but the code never emitted were
@@ -79,7 +79,8 @@ invoke it multiple times. `llm.completed` is therefore a repeatable event
 tagged with `purpose`, never a once-per-request event.
 
 Rate-limited requests (HTTP 429) are rejected in middleware **before** the
-router runs. They get no `request_id` and emit no events today (see §4).
+router runs. They get no `request_id`, have no `request.completed`, and emit a
+single bounded `rate_limit.blocked` event (M8.4, §4, §14).
 
 ---
 
@@ -91,7 +92,7 @@ One `request.completed` event per request, emitted by the router handler
 | Field | Where | Notes |
 |---|---|---|
 | `request_id` | envelope | uuid4, assigned in `api/routers.py` before `validate_query()`, so even a guardrail rejection is correlatable. |
-| `status` | envelope | Request-level: `success`, `blocked`, `error`. `rate_limited` is **not** emitted (§4). `success` means the handler completed normally; it does **not** assert the business operation succeeded — a pipeline that catches its own exception and returns an `error` dict still yields `success` here. |
+| `status` | envelope | Request-level: `success`, `blocked`, `error`. A rate-limited request has no `request.completed`; the `rate_limited` request status is not emitted, and the rejection is recorded by `rate_limit.blocked` instead (§4, §14). `success` means the handler completed normally; it does **not** assert the business operation succeeded — a pipeline that catches its own exception and returns an `error` dict still yields `success` here. |
 | `duration_ms` | envelope | Real handler duration, integer ms. |
 | `metadata.route` | metadata | `/query`, `/rag`, `/analytics`. |
 | `metadata.error_type` | metadata | Present only when `status == "error"`. Exception class name only. |
@@ -159,6 +160,7 @@ Only events the code actually emits are listed.
 | `analytics.sql.failed` | same | `intent`, `used_fallback_sql`, `primary_error_type`, `error_type` |
 | `analytics.completed` | same | success: `intent`, `confidence`, `chart_generated`. failure: `error_type`. An honest "insufficient data" answer is `success`; only an unexpected internal failure is `failure`. |
 | `request.completed` | `api/routers.py` | `route`, `cost_status`, `cost_usd_total`; plus `error_type` on error (§2) |
+| `rate_limit.blocked` | `src/safety/rate_limit.py` (middleware, M8.4) | `route` only: `/query`, `/rag`, `/analytics`, else `other`. `status=blocked`, `duration_ms=null`, `request_id` is `-` (no request context exists yet). Never a raw path or any client identifier. Not emitted for `/signals` and `/metrics`. |
 
 `llm.purpose` values emitted by code: `intent_classification`,
 `language_detection`, `translation`, `query_rewrite`, `rag_answer`,
@@ -174,9 +176,9 @@ because ranking runs with `use_llm=False`).
 | `retrieval.empty` | There is no such event. Zero results after a successful retrieval is `retrieval.completed` with `candidate_count=0`; a retrieval that did not run is `retrieval.skipped`. |
 | `scoring.completed` | `score_answer` is not instrumented. |
 | `fallback.low_confidence` | The `final_score < 0.12` fallback in the orchestrator emits no event. |
-| `rate_limit.blocked` | The middleware returns 429 and writes a log line only. |
 
 Re-adding any of these is an explicit decision, not an assumed catalog entry.
+(`rate_limit.blocked` was in this list until M8.4 added it deliberately.)
 
 Not instrumented individually (by design): `sanitize_input`, the internal
 steps of `process_query`, `build_context`, `to_chart_data`.
@@ -200,7 +202,7 @@ Still open:
    contract.
 5. **Process-global budget guard** (`SESSION_COST_USD`) is intentionally
    global and separate from request attribution (§8).
-6. **Rate-limited requests are invisible** to the event stream (§4).
+6. **Rate-limited requests** were invisible to the event stream until M8.4; they are now counted via `rate_limit.blocked` (§14). Instrumented application request volume is `requests_total + rate_limited_total`; it is still not every possible HTTP request to the server.
 
 ---
 
@@ -220,8 +222,11 @@ happened?" must not exist.
   (`sql`), but is excluded from telemetry.** The response field grounds the
   answer; events carry only `intent`, `used_fallback_sql`, `row_count` and
   error types.
-- Client IP is held in memory by the rate limiter only and is never emitted.
-  If rate-limit events are ever added, hash or truncate the IP first.
+- Client IP is held in memory by the rate limiter only. It is never emitted
+  in an event and, as of M8.4, never written to a log line: the former
+  `Blocked ip=...` warning now logs only the bounded route and the window
+  count. `rate_limit.blocked` carries the route and nothing that identifies a
+  client.
 
 ---
 
@@ -406,6 +411,8 @@ Rules:
 | `ranking.skipped` | `candidate_count` | measure |  |
 | `ranking.skipped` | `selected_count` | measure |  |
 | `ranking.skipped` | `status` | dimension | `skipped`; else `other` |
+| `rate_limit.blocked` | `route` | dimension | `/analytics`, `/query`, `/rag`, `other`; else `other` |
+| `rate_limit.blocked` | `status` | dimension | `blocked`; else `other` |
 | `request.completed` | `cost_status` | dimension | `complete`, `not_applicable`, `partial`, `unknown`; else `other` |
 | `request.completed` | `cost_usd_total` | measure |  |
 | `request.completed` | `error_type` | dimension | known exception classes, else `other` |
@@ -445,6 +452,7 @@ Rules:
 | `ranking.completed` | 4 |
 | `ranking.failed` | 32 |
 | `ranking.skipped` | 2 |
+| `rate_limit.blocked` | 8 |
 | `request.completed` | 1280 |
 | `request.started` | 8 |
 | `retrieval.completed` | 4 |
@@ -587,8 +595,9 @@ Rules:
 - **Unclassified input** (unknown event, unknown or forbidden key, malformed
   input) is counted in `signals_unclassified_total` and skipped; it never
   crashes the aggregator. `strict=True` raises, for tests.
-- **Cumulative only.** No time windows. Request volume is not HTTP volume
-  (rate-limited requests emit no events, §5).
+- **Cumulative only.** No time windows. Instrumented application request volume is
+  `requests_total + rate_limited_total` (§14); it is still not every possible
+  HTTP request.
 - **`llm.fallback` is a terminal event for the downgrade, not an LLM call
   outcome.** `llm_fallbacks_total` counts it from its own event;
   `llm_calls_total` counts only `llm.completed` / `llm.failed`.
@@ -598,6 +607,7 @@ Rules:
 | `requests_total` | counter | `route`, `status` |
 | `request_duration_ms` | histogram | `route`, `status` |
 | `request_cost_usd_total` | sum | `route`, `cost_status` |
+| `rate_limited_total` | counter (`rate_limit.blocked`) | `route` |
 | `llm_calls_total` | counter | `purpose`, `model`, `status` |
 | `llm_duration_ms` | histogram | `purpose` |
 | `llm_retries_total` | sum of `retry_count` | `purpose` |
@@ -639,7 +649,9 @@ kept. A null `duration_ms` is skipped, never treated as 0. Percentiles
 a percentile landing in the overflow bucket reports `+Inf`.
 
 **Rates** (cumulative, whole-snapshot ratios; `null` when undefined):
-`request_error_rate`, `request_block_rate`, `guardrail_block_rate`,
+`request_error_rate`, `request_block_rate`, `request_rate_limited_ratio`
+(`rate_limited_total / (requests_total + rate_limited_total)`; `null` when both
+are 0), `guardrail_block_rate`,
 `llm_failure_rate`, `llm_retry_rate` (retried completed calls / completed
 calls), `llm_fallback_rate` (fallbacks / LLM calls), `retrieval_empty_rate`
 (empty / successful retrievals), `retrieval_skip_rate`,
@@ -648,7 +660,7 @@ calls), `llm_fallback_rate` (fallbacks / LLM calls), `retrieval_empty_rate`
 
 ---
 
-## 14. Exposure design (M8) [M8.1-M8.3 implemented; M8.4 design-locked, not implemented]
+## 14. Exposure design (M8) [M8.1-M8.4 implemented]
 
 M8 exposes the M7.3 signals without coupling to a vendor. Target: **pull-based,
 in-process** signals; JSONL replay (§13 CLI) remains the offline path. Push to
@@ -807,14 +819,32 @@ sum(rate(llm_calls_per_request_sum{purpose="language_detection"}[5m]))
   / sum(rate(llm_calls_per_request_count{purpose="language_detection"}[5m]))
 ```
 
-**M8.4: `rate_limit.blocked` event [design-locked].** The middleware emits a
-bounded event for requests rejected before the router.
-- Labelled by `route` only: `/query`, `/rag`, `/analytics`, anything else
-  `other`. No raw path is ever a label. It has no `request_id`.
-- Requires classifying the event in the M7.2 policy and updating the runtime
-  completeness test.
-- Afterwards, "instrumented application request volume" is approximately
-  `request.completed` plus `rate_limit.blocked`; it is still not every
+**M8.4: `rate_limit.blocked` event [implemented]** (`src/safety/rate_limit.py`).
+The middleware emits one bounded event for each request it rejects, before the
+router runs.
+- **Metadata is `route` only.** The raw path is mapped to a bounded value
+  *before the event is built* (`/query`, `/rag`, `/analytics`, trailing slash
+  tolerated; everything else `other`), so no event ever carries a raw path. No
+  `count`, `limit`, IP, hash, or other client identifier.
+- `status=blocked`, `duration_ms=null` (unmeasured, never a fake 0), and
+  `request_id` is `-`: the middleware runs before any request context exists,
+  so the per-request signal ignores it.
+- **Control-plane exclusion:** `/signals` and `/metrics` emit no event (they
+  are not application traffic; a throttled scraper must not inflate the
+  `other` bucket). The 429 is unchanged and the throttle is still logged
+  (`route=control_plane`).
+- **Telemetry never changes the decision.** Recording a block has its own
+  guard; if logging or emission fails the request is still answered 429 (the
+  existing outer fail-open still applies to genuine limiter failures).
+- **Privacy:** the raw client IP is no longer written to the rate-limit
+  warning (it logs route and window count only), consistent with §6.
+- Classified in the M7.2 policy (`route` and `status` as dimensions; the route
+  domain is the three routes plus `other`). Signals: `rate_limited_total{route}`
+  and `request_rate_limited_ratio` (§13); exposition: `rate_limited_total`
+  counter with `HELP` (§14 M8.3).
+- Volume semantics: `requests_total` = requests that reached the request
+  lifecycle; `rate_limited_total` = requests the limiter rejected;
+  instrumented application volume = their sum. That is still not every
   possible HTTP request to the server.
 
 ---

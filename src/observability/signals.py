@@ -76,6 +76,9 @@ METRICS: Tuple[MetricSpec, ...] = (
                value="duration_ms"),
     MetricSpec("request_cost_usd_total", SUM, ("request.completed",), ("route", "cost_status"),
                value="cost_usd_total"),
+    # Rate-limited requests never reach the request lifecycle, so they have no
+    # request.completed: this counter is what closes the volume gap.
+    MetricSpec("rate_limited_total", COUNTER, ("rate_limit.blocked",), ("route",)),
     # --- llm -------------------------------------------------------------
     MetricSpec("llm_calls_total", COUNTER, ("llm.completed", "llm.failed"),
                ("purpose", "model", "status")),
@@ -353,6 +356,10 @@ class Aggregator:
         return {
             "request_error_rate": self._ratio(t("requests_total", status="error"), t("requests_total")),
             "request_block_rate": self._ratio(t("requests_total", status="blocked"), t("requests_total")),
+            # Instrumented application request volume = requests that reached
+            # the request lifecycle + requests the limiter rejected before it.
+            "request_rate_limited_ratio": self._ratio(
+                t("rate_limited_total"), t("requests_total") + t("rate_limited_total")),
             "guardrail_block_rate": self._ratio(t("guardrails_total", status="blocked"), t("guardrails_total")),
             "llm_failure_rate": self._ratio(t("llm_calls_total", status="failure"), t("llm_calls_total")),
             "llm_retry_rate": self._ratio(t("llm_retried_calls_total"), t("llm_calls_total", status="success")),

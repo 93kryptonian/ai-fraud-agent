@@ -70,6 +70,7 @@ _MODEL_DOMAIN = "models"
 
 _BOOL = frozenset({"true", "false"})
 _ROUTES = frozenset({"/query", "/rag", "/analytics"})
+_ROUTES_OR_OTHER = _ROUTES | {"other"}
 _REQUEST_INTENTS = frozenset({"rag", "analytics", "reject"})
 _ANALYTICS_INTENTS = frozenset({"timeseries", "merchant_rank", "category_rank", "generic", NONE_VALUE})
 _INTENT_METHODS = frozenset({"heuristic", "llm"})
@@ -126,6 +127,9 @@ def _event(name: str, status, **keys: Rule) -> None:
 
 
 _event("request.started", _SUCCESS, route=_D(_ROUTES))
+# M8.4: emitted by the rate-limit middleware before any request context
+# exists (request_id "-"); the route is already mapped to a bounded value.
+_event("rate_limit.blocked", {"blocked"}, route=_D(_ROUTES_OR_OTHER))
 _event("request.completed", {"success", "blocked", "error"},
        route=_D(_ROUTES), error_type=_D(_ERROR_DOMAIN),
        cost_status=_D(_COST_STATUS), cost_usd_total=_M)
