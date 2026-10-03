@@ -4,7 +4,7 @@ Status: **reconciled after M6, updated for M7.1.** M6 is implemented and
 frozen at `513f4b4`. Sections marked **[implemented]** describe what the code
 emits today (M7.1 request-level cost is implemented, §8). Sections marked
 **[design-only]** describe M7 design direction; nothing in them is
-implemented yet. (M7.2 dimension policy, §9, M7.3 operational signals, §13, and the M8.1 live feed, §14, are implemented.)
+implemented yet. (M7.2 dimension policy, §9, M7.3 operational signals, §13, the M8.1 live feed and the M8.2 `/signals` endpoint, §14, are implemented.)
 
 This document began as the M2 contract. It has been reconciled against the
 actual code: events the M2 text promised but the code never emitted were
@@ -648,7 +648,7 @@ calls), `llm_fallback_rate` (fallbacks / LLM calls), `retrieval_empty_rate`
 
 ---
 
-## 14. Exposure design (M8) [M8.1 implemented; M8.2-M8.4 design-locked, not implemented]
+## 14. Exposure design (M8) [M8.1 and M8.2 implemented; M8.3-M8.4 design-locked, not implemented]
 
 M8 exposes the M7.3 signals without coupling to a vendor. Target: **pull-based,
 in-process** signals; JSONL replay (§13 CLI) remains the offline path. Push to
@@ -687,15 +687,35 @@ emit_event()
   Counters are cumulative since then. Scaling out gives per-instance state.
 - No endpoint exists yet (M8.2).
 
-**M8.2: JSON snapshot endpoint [design-locked].** `GET /signals`, disabled by
-default.
-- `SIGNALS_ENABLED=false` -> 404, no handler attached, no aggregator.
-- Enabled -> requires `Authorization: Bearer <token>`; missing or wrong token
-  is rejected. There is no partially redacted public variant.
-- The token never appears in telemetry or error responses.
-- Contains only bounded dimensions (no `request_id`, `query_hash` or content).
-- Returns the M7.3 snapshot, including rates and percentiles as debugging
-  conveniences.
+**M8.2: JSON snapshot endpoint [implemented]** (`api/signals.py`).
+`GET /signals` with `Authorization: Bearer <SIGNALS_TOKEN>` returns the M7.3
+snapshot (`metrics`, `rates`, `meta`, including rates and percentiles as
+debugging conveniences).
+- **Registered only when it can serve**: the live feed is enabled
+  (`SIGNALS_ENABLED=true`) **and** `SIGNALS_TOKEN` is non-empty. Otherwise the
+  route does not exist: plain `404`, and `/signals` is absent from the OpenAPI
+  schema. Enabled without a token fails closed (a warning is logged at
+  startup); there is no "no token means open" mode. The handler re-checks both
+  conditions at request time.
+- Enabled and credentials missing, malformed, or wrong -> `401`, body
+  `{"error": "Unauthorized"}`, `WWW-Authenticate: Bearer`. The scheme is
+  case-insensitive. There is no redacted public variant.
+- The token is compared in constant time (`hmac.compare_digest`) and never
+  appears in a response, a log line, or an event; a presented wrong
+  credential is never echoed.
+- A snapshot failure returns a generic `503` with no internal detail.
+- Responses carry `Cache-Control: no-store`.
+- **The endpoint does not observe itself.** The handler emits no request
+  events and sets no `request_id`, so `/signals` calls never contribute to
+  `requests_total`, request latency, or `events_observed`. This is an explicit,
+  tested rule: a frequent scraper must not dominate the request signals.
+- The existing rate limiter and CORS middleware apply as for every route (the
+  default is 20 requests per minute per client; size a scrape interval
+  accordingly).
+- Only bounded dimensions and measures are exposed (no `request_id`,
+  `query_hash`, or content). `meta.started_at_unix`, `meta.handler_errors`,
+  `meta.ignored_records`, `meta.events_observed` and `meta.in_flight_requests`
+  are plain numbers, never labels or dimensions.
 
 **M8.3: Prometheus text exposition [design-locked].** A separate mapping from
 the analytical snapshot; the exposition format is not the internal model.
