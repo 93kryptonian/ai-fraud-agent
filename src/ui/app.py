@@ -118,7 +118,7 @@ def handle_query(query: str) -> dict:
         return {
             "type": "error",
             "error": "Orchestrator failed.",
-            "details": escape(str(result.get("error"))),
+            "details": None,
         }
 
     payload = result.get("result", {})
@@ -261,6 +261,16 @@ with col_side:
         conf = analytics.get("confidence")
         if isinstance(conf, (int, float)):
             st.caption(f"Confidence: **{conf:.2f}**")
+
+        sql_used = analytics.get("sql")
+        if sql_used:
+            st.markdown("#### 🧾 Executed SQL")
+            st.code(sql_used, language="sql")
+
+        rows = analytics.get("data_points")
+        if rows:
+            st.markdown("#### 📋 Result rows")
+            st.dataframe(rows)
 
         chart_data = analytics.get("chart_data")
         if chart_data:

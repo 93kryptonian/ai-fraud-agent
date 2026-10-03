@@ -37,7 +37,7 @@ TEST_CASES = [
     },
     {
         "query": "Which merchants or merchant categories exhibit the highest incidence of fraudulent transactions?",
-        "expected_intent": "rag",
+        "expected_intent": "analytics",
     },
     {
         "query": "What are the primary methods by which credit card fraud is committed?",

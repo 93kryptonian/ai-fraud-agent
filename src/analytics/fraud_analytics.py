@@ -15,6 +15,7 @@ Design principles:
 
 import os
 import re
+import textwrap
 from typing import Dict, Any, Optional, Tuple, List
 
 import numpy as np
@@ -52,17 +53,32 @@ def normalize_sql(sql: str) -> str:
     return re.sub(r"\s+", " ", sql).strip()
 
 
+_FORBIDDEN_SQL_RE = re.compile(
+    r"\b(insert|delete|update|drop|alter|create|truncate|grant|revoke|copy|"
+    r"call|do|execute|pg_sleep|pg_read_file|lo_import|set)\b|"
+    r"\bpg_\w+|\binformation_schema\b",
+    re.I,
+)
+
+
 def is_safe_select(sql: str) -> bool:
     """
-    Enforce SELECT-only SQL.
-    Blocks DDL/DML to prevent destructive queries.
-    """
-    s = sql.strip().lower()
-    if not s.startswith("select"):
-        return False
+    Enforce a single SELECT-only statement.
 
-    forbidden = ("insert ", "delete ", "update ", "drop ", "alter ", "create ")
-    return not any(tok in s for tok in forbidden)
+    Defence in depth only: DB.sql() also runs in a READ ONLY transaction
+    with a statement_timeout, which is the real protection.
+    """
+    s = sql.strip().rstrip(";").strip()
+    if not s.lower().startswith("select"):
+        return False
+    if ";" in s:  # statement chaining
+        return False
+    return not _FORBIDDEN_SQL_RE.search(s)
+
+
+def format_sql(sql: str) -> str:
+    """Human-readable SQL for the response (the grounding for the answer)."""
+    return textwrap.dedent(sql).strip()
 
 
 def strip_html(text: str) -> str:
@@ -207,7 +223,8 @@ def nl_to_sql(nl_query: str, intent: str) -> str:
     sql = normalize_sql(strip_markdown(str(raw)))
 
     if not is_safe_select(sql):
-        raise ValueError(f"Unsafe SQL generated: {sql}")
+        logger.warning(f"[analytics] Unsafe SQL rejected: {sql}")
+        raise ValueError("Unsafe SQL generated.")
 
     return sql
 
@@ -437,11 +454,10 @@ def run_analytics(nl_query: str, lang: str = "en") -> Dict[str, Any]:
       (if needed) a fallback template — exactly one terminal event for
       that whole resolution, not one per attempt (same "one terminal
       event per stage" rule used for LLM retries).
-    - The details=str(e) in the except block below is a pre-existing,
-      separate application bug (can leak SQL/DB internals into the HTTP
-      response) — left untouched here on purpose; fixing it is an app
-      bug fix, not an observability change, and mixing the two was
-      explicitly the wrong call per the M6 design review.
+    - The outer except no longer returns str(e) (it could leak SQL/DB
+      internals); details stay in the server log only.
+    - The response carries the exact executed SQL (`sql`) so every
+      analytics answer is grounded and verifiable.
     """
     with elapsed_timer() as elapsed:
 
@@ -483,12 +499,14 @@ def run_analytics(nl_query: str, lang: str = "en") -> Dict[str, Any]:
             # ---------------------------------------------------------
             with elapsed_timer() as sql_elapsed:
                 df = pd.DataFrame()
+                executed_sql = None
                 primary_error_type = None
                 used_fallback_sql = False
 
                 try:
                     sql = nl_to_sql(nl_query, intent)
                     df = execute_sql(sql)
+                    executed_sql = sql
                 except Exception as e:
                     primary_error_type = type(e).__name__
                     logger.warning(f"[analytics] NL→SQL failed: {e}")
@@ -498,11 +516,16 @@ def run_analytics(nl_query: str, lang: str = "en") -> Dict[str, Any]:
                     logger.info("[analytics] Using fallback SQL.")
                     try:
                         if intent == "timeseries":
-                            df = execute_sql(fallback_time_series_sql(nl_query))
+                            fb_sql = fallback_time_series_sql(nl_query)
                         elif intent == "category_rank":
-                            df = execute_sql(fallback_count_by_category_sql())
+                            fb_sql = fallback_count_by_category_sql()
                         elif intent == "merchant_rank":
-                            df = execute_sql(fallback_merchant_fraud_sql())
+                            fb_sql = fallback_merchant_fraud_sql()
+                        else:
+                            fb_sql = None
+                        if fb_sql:
+                            df = execute_sql(fb_sql)
+                            executed_sql = fb_sql
                         # "generic" intent has no fallback template — df
                         # stays empty, handled by the insufficient-data
                         # branch below, not a failure of this stage.
@@ -542,6 +565,7 @@ def run_analytics(nl_query: str, lang: str = "en") -> Dict[str, Any]:
                     answer=msg,
                     data_points=None,
                     chart_data=None,
+                    sql=format_sql(executed_sql) if executed_sql else None,
                     confidence=0.0,
                 ).model_dump()
 
@@ -560,6 +584,7 @@ def run_analytics(nl_query: str, lang: str = "en") -> Dict[str, Any]:
                 answer=strip_html(summary),
                 data_points=df.to_dict(orient="records"),
                 chart_data=chart,
+                sql=format_sql(executed_sql) if executed_sql else None,
                 confidence=conf,
             ).model_dump()
 
@@ -568,5 +593,4 @@ def run_analytics(nl_query: str, lang: str = "en") -> Dict[str, Any]:
             _completed("failure", error_type=type(e).__name__)
             return ErrorResponse(
                 error="Analytics failed.",
-                details=str(e),
             ).model_dump()
