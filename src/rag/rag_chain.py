@@ -6,23 +6,17 @@ Responsibilities:
 - Retrieve relevant document chunks
 - Construct bounded, traceable context
 - Build safe, grounded prompts
-- Handle special inference modes when chunk-based RAG is insufficient
 
 Design principles:
 - Context-first, not LLM-first
 - Hard character limits to prevent overflow
 - Explicit fallback instructions
-- Special inference modes are isolated and intentional
 """
 
-import re
 from typing import Dict, Any, List
 
-from src.rag.retriever_direct import retrieve_top_k
+from src.rag.retriever_direct import retrieve_top_k_with_status
 from src.llm.llm_client import llm
-from src.db.supabase_client import DB
-from src.observability.events import emit_event
-from src.observability.timing import elapsed_timer
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -106,147 +100,6 @@ Fallback answer:
 """.strip()
 
 # =============================================================================
-# MERCHANT INFERENCE MODE (SPECIAL CASE)
-# =============================================================================
-
-MERCHANT_Q_PATTERNS = (
-    "which merchants",
-    "merchant categories",
-    "highest incidence of fraudulent transactions",
-    "highest fraud incidence",
-    "which merchant categories exhibit",
-)
-
-
-def is_merchant_incidence_question(text: str) -> bool:
-    """
-    Detect questions that require holistic merchant-level inference.
-    """
-    t = text.lower()
-    return any(p in t for p in MERCHANT_Q_PATTERNS)
-
-
-def merchant_inference_mode(
-    query_en: str,
-    db_client,
-    llm_client,
-    user_lang: str = "en",
-) -> Dict[str, Any]:
-    """
-    Holistic inference mode for merchant fraud questions.
-
-    This bypasses top-k retrieval and instead loads all
-    merchant-related pages to enable document-level reasoning.
-    """
-    keyword_filter = (
-        "merchant",
-        "merchants",
-        "merchant fraud",
-        "merchant related",
-    )
-
-    # ---------------------------------------------------------
-    # Step 1 — Load all merchant-related pages
-    # ---------------------------------------------------------
-    sql = """
-        SELECT d.id, d.content, d.page, d.source_name
-        FROM documents d
-        WHERE LOWER(d.content) ~ ANY(%s)
-        ORDER BY d.page ASC;
-    """
-
-    patterns = [f".*{re.escape(k)}.*" for k in keyword_filter]
-
-    with elapsed_timer() as elapsed:
-        try:
-            rows = db_client.sql(sql, (patterns,))
-        except Exception as e:
-            emit_event(
-                "retrieval.failed", step="retrieval", status="failure",
-                duration_ms=elapsed(),
-                metadata={"retrieval_method": "merchant_inference", "error_type": type(e).__name__},
-            )
-            raise
-
-        emit_event(
-            "retrieval.completed",
-            step="retrieval", status="success",
-            duration_ms=elapsed(),
-            metadata={
-                "retrieval_method": "merchant_inference",
-                "candidate_count": len(rows),
-                "selected_count": len(rows),  # no reranking in this path
-            },
-        )
-
-    if not rows:
-        return {
-            "type": "rag",
-            "answer": None,
-            "context_text": "",
-            "chunks": [],
-            "citations": [],
-            "inference_used": True,
-        }
-
-    # ---------------------------------------------------------
-    # Step 2 — Build long-range context
-    # ---------------------------------------------------------
-    full_context = ""
-    max_chars = 15_000
-    total_chars = 0
-
-    chunks: List[dict] = []
-
-    for r in rows:
-        snippet = (
-            f"[Page {r['page']} - {r['source_name']}]\n"
-            f"{r['content']}\n\n"
-        )
-        total_chars += len(snippet)
-        if total_chars > max_chars:
-            break
-
-        full_context += snippet
-        chunks.append(r)
-
-    # ---------------------------------------------------------
-    # Step 3 — Inference prompt
-    # ---------------------------------------------------------
-    prompt = f"""
-You are a fraud intelligence expert.
-
-Below are extracted report pages related to merchant fraud.
-Read them holistically (not chunk-by-chunk) and infer patterns.
-
-QUESTION:
-{query_en}
-
-DOCUMENT EXTRACTS:
-{full_context}
-
-INSTRUCTIONS:
-- Summarize fraud patterns by merchant or category
-- Identify entities with the highest fraud incidence
-- Base conclusions strictly on the documents
-- List page numbers used
-""".strip()
-
-    # ---------------------------------------------------------
-    # Step 4 — LLM inference
-    # ---------------------------------------------------------
-    answer = llm_client.run(prompt, temperature=0.0, purpose="merchant_inference")
-
-    return {
-        "type": "rag",
-        "answer": answer,
-        "chunks": chunks,
-        "context_text": full_context,
-        "citations": build_citations(chunks),
-        "inference_used": True,
-    }
-
-# =============================================================================
 # MAIN RAG ENTRYPOINT
 # =============================================================================
 
@@ -254,20 +107,35 @@ def run_rag(query_en: str, user_lang: str) -> Dict[str, Any]:
     """
     Execute the RAG pipeline for a single query.
     """
-    # Special inference path
-    if is_merchant_incidence_question(query_en):
-        logger.info("[RAG] Merchant inference mode activated.")
-        return merchant_inference_mode(
-            query_en=query_en,
-            db_client=DB,
-            llm_client=llm,
-            user_lang=user_lang,
-        )
-
     # ---------------------------------------------------------
     # Standard chunk-based RAG
     # ---------------------------------------------------------
-    chunks = retrieve_top_k(query_en, top_k=10, source_name=None)
+    chunks, retrieval_status = retrieve_top_k_with_status(
+        query_en, top_k=10, source_name=None
+    )
+
+    if not chunks:
+        # No context: don't pay for an LLM call that can only produce the
+        # fallback, and tell the caller *why* (outage vs. nothing relevant).
+        logger.warning(f"[RAG] No chunks | retrieval_status={retrieval_status}")
+        if retrieval_status == "unavailable":
+            answer = (
+                "Sorry, the document search is temporarily unavailable. "
+                "Please try again later."
+            )
+        else:
+            answer = (
+                "Sorry, the available documents do not provide enough "
+                "information to answer your question."
+            )
+        return {
+            "type": "rag",
+            "answer": answer,
+            "chunks": [],
+            "context_text": "",
+            "citations": [],
+            "retrieval_status": retrieval_status,
+        }
 
     context_text = build_context(chunks)
     prompt = build_prompt(query_en, context_text, user_lang)
@@ -280,4 +148,5 @@ def run_rag(query_en: str, user_lang: str) -> Dict[str, Any]:
         "chunks": chunks,
         "context_text": context_text,
         "citations": build_citations(chunks),
+        "retrieval_status": retrieval_status,
     }

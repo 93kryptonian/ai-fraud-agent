@@ -47,10 +47,9 @@ sanitize_input
 ```
 
 `run_rag()`'s `retrieve_top_k` call already does its own sub-pipeline
-(embed query → `match_documents` RPC → `rerank_chunks`), and has a second,
-entirely different code path (`merchant_inference_mode`) triggered by a
-keyword match instead of normal retrieval — both must be distinguishable in
-telemetry, not collapsed into one "retrieval" event.
+(embed query → `match_documents` RPC → `rerank_chunks`). (A second path,
+`merchant_inference_mode`, existed historically and was removed; merchant
+ranking questions are now answered by analytics SQL.)
 
 `run_analytics()` does: `classify_analytics_intent` → `nl_to_sql` (template
 or LLM-generated) → `execute_sql` → summarize → optional
@@ -58,7 +57,7 @@ or LLM-generated) → `execute_sql` → summarize → optional
 
 **The LLM client (`llm.run`) is called from at least 8 different call sites**
 (intent classification, language-detection fallback, translation ×2, query
-rewrite, RAG answer generation, merchant inference, analytics NL→SQL,
+rewrite, RAG answer generation, analytics NL→SQL,
 analytics summary refinement, LLM reranking) — a single request can invoke it
 multiple times. Every event schema below assumes this: `llm.completed` is a
 repeatable event tagged with a `purpose`, not a once-per-request event.
@@ -129,9 +128,9 @@ knows exactly where the instrumentation call goes.
 | `guardrails.completed` / `guardrails.blocked` | `src/safety/guardrails.py::validate_query` | `blocked` (bool), `reason` (`too_short\|noise\|injection\|out_of_domain\|null`), `query_length`, `query_hash` (see §6 — never raw text) |
 | `language_detection.completed` | `src/rag/question_rewrite.py::detect_language` | `lang`, `method` (`heuristic\|llm_fallback`) |
 | `intent.completed` | `src/orchestrator.py::detect_intent` | `intent`, `confidence`, `method` (`heuristic\|llm`), `route` |
-| `retrieval.completed` / `retrieval.empty` | `src/rag/retriever_direct.py::retrieve_top_k` | `retrieval_method` (`vector_rpc\|merchant_inference\|disabled`), `candidate_count`, `selected_count`, `source_filter` |
+| `retrieval.completed` / `retrieval.empty` | `src/rag/retriever_direct.py::retrieve_top_k` | `retrieval_method` (`vector_rpc\|disabled`), `candidate_count`, `selected_count`, `source_filter` |
 | `ranking.completed` / `ranking.skipped` | `src/rag/ranking.py::rerank_chunks` | `candidate_count`, `selected_count`, `reranker` (`hybrid\|hybrid+llm`), `top_result_score`, `embeddings_available` (bool) |
-| `llm.completed` / `llm.failed` | `src/llm/llm_client.py::LLMClient.run` | `purpose` (`intent_classification\|language_detection\|translation\|query_rewrite\|rag_answer\|merchant_inference\|analytics_nl_to_sql\|analytics_summary\|llm_rerank`), `model`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `estimated_cost_usd`, `retry_count`, `fallback_triggered` (bool) |
+| `llm.completed` / `llm.failed` | `src/llm/llm_client.py::LLMClient.run` | `purpose` (`intent_classification\|language_detection\|translation\|query_rewrite\|rag_answer\|analytics_nl_to_sql\|analytics_summary\|llm_rerank`), `model`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `estimated_cost_usd`, `retry_count`, `fallback_triggered` (bool) |
 | `llm.fallback` | `LLMClient.run`, budget-downgrade branch | `from_model`, `to_model`, `reason` (`budget_threshold` — the only reason implemented today; `failure`/`timeout` are not distinguished by current code, see §5), `cumulative_session_cost_usd` |
 | `analytics.sql_executed` | `src/analytics/fraud_analytics.py::execute_sql` | `template` (`merchant_rank\|category_rank\|timeseries\|llm_generated`), `row_count`, `truncated` (bool) |
 | `analytics.completed` | `run_analytics` return | `intent`, `confidence`, `chart_generated` (bool) |

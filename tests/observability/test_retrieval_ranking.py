@@ -1,14 +1,13 @@
 # tests/observability/test_retrieval_ranking.py
 """
 Tests for M6.1-M6.2: retrieval and ranking instrumentation
-(src/rag/retriever_direct.py, src/rag/rag_chain.py's merchant inference).
+(src/rag/retriever_direct.py).
 
 Covers retrieval's status semantics — success / failure / skipped are
 genuinely different conditions, previously all collapsed into a silent
 empty list — and the separated retrieval/ranking exception boundaries
 (a ranking bug is never misattributed as a retrieval failure), plus
-merchant inference's distinct retrieval_method and privacy (no raw
-document/query content in any event).
+privacy (no raw document/query content in any event).
 """
 
 import json
@@ -179,26 +178,6 @@ def test_ranking_failed_fails_closed(event_records, monkeypatch):
     events = _parsed(event_records)
     assert events[1]["metadata"]["error_type"] == "ValueError"
 
-
-def test_merchant_inference_uses_its_own_retrieval_method(event_records):
-    from src.rag.rag_chain import merchant_inference_mode
-
-    fake_db = SimpleNamespace(sql=lambda sql, params: [
-        {"id": "1", "content": "merchant fraud page", "page": 1, "source_name": "Bhatla"},
-    ])
-    fake_llm = SimpleNamespace(run=lambda *a, **kw: "an answer")
-
-    merchant_inference_mode("which merchants have the most fraud?", fake_db, fake_llm)
-
-    events = _parsed(event_records)
-    retrieval_evt = next(e for e in events if e["event"] == "retrieval.completed")
-    assert retrieval_evt["metadata"]["retrieval_method"] == "merchant_inference"
-    assert retrieval_evt["metadata"]["candidate_count"] == 1
-
-
-# =============================================================================
-# Privacy
-# =============================================================================
 
 def test_no_raw_content_in_retrieval_ranking_events(event_records, monkeypatch):
     import src.rag.retriever_direct as retriever_module
