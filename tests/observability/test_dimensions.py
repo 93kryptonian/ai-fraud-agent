@@ -458,3 +458,23 @@ def test_emit_event_does_not_use_dimensions():
         encoding="utf-8"
     )
     assert "dimensions" not in src
+
+
+def test_contract_names_the_tightest_series_bound_correctly():
+    """
+    The contract's prose states which event is closest to the cap and by how
+    much. Tie that sentence to the policy so it cannot go stale when a domain
+    changes (the generated table is already synced; this covers the prose).
+    """
+    import pathlib
+    import re
+
+    doc = (pathlib.Path(__file__).resolve().parents[2] / "docs" / "observability-contract.md").read_text(
+        encoding="utf-8"
+    )
+    m = re.search(r"Tightest bound at the time of writing: `([a-z_.]+)` at ([\d,]+) of ([\d,]+)\.", doc)
+    assert m, "contract §9 must state the tightest series bound"
+    event, bound, cap = m.group(1), int(m.group(2).replace(",", "")), int(m.group(3).replace(",", ""))
+
+    tightest = max(dim.events(), key=dim.series_upper_bound)
+    assert (event, bound, cap) == (tightest, dim.series_upper_bound(tightest), dim.CARDINALITY_CAP)

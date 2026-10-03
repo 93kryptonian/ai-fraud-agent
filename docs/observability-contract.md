@@ -388,6 +388,24 @@ Rules:
   would be fictitious cardinality. Multi-valued dimensions still add the
   `other` bucket. The `other` mapping itself is unchanged; value drift in code
   is caught by the domain-sync tests.
+- **The 2,000-series cap is a design budget, not a runtime enforcement
+  mechanism.** Nothing in the aggregator, the live feed or the exporter
+  truncates, rejects or samples series at 2,000, and no metric family is
+  prevented from exceeding it at runtime: label values are bounded by the
+  closed domains above, and the cap only checks that those domains, taken
+  together, stay within budget. The check is a test
+  (`test_series_upper_bound_within_cap`) plus review. Every event's theoretical
+  bound must stay at or below the cap. A change that would push any event above
+  it (see below) must be revisited deliberately, in the dimension policy and/or
+  the event schema, **before the expansion is accepted**; raising the cap is a
+  design decision with its own justification, not a way to make a failing test
+  pass.
+  Tightest bound at the time of writing: `request.completed` at 1,840 of 2,000.
+  The generated table below is authoritative; the bound grows with the product
+  of every multi-valued dimension, so these are the levers that consume the
+  remaining headroom: error classes (counted once per event, but the largest
+  single factor), routes, request statuses, cost statuses, LLM purposes and
+  models. Adding a value to any of them needs a contract review first.
 
 <!-- dimensions:start -->
 | Event | Key | Class | Allowed values |
