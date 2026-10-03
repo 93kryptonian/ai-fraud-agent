@@ -64,6 +64,27 @@ def sanitize_input(raw: str) -> str:
 # INTENT DETECTION
 # =============================================================================
 
+# Aggregation / ranking over the transaction dataset ("which merchants have the
+# highest fraud") is a data question: it must be answered with SQL over
+# fraud_transactions, not by an LLM reading document pages (far costlier and
+# not verifiable). Checked BEFORE the conceptual keywords for that reason.
+_RANKING_RE = re.compile(
+    r"\b(highest|lowest|most|top|rank(?:ing|ed)?|how many|how much|count|"
+    r"tertinggi|terendah|terbanyak|peringkat|berapa)\b",
+    re.I,
+)
+_DATA_ENTITY_RE = re.compile(
+    r"\b(merchants?|categor(?:y|ies)|kategori|toko|fraud rate|fraud count|"
+    r"incidence|transactions?|transaksi)\b",
+    re.I,
+)
+# Questions explicitly about the published reports stay with RAG even if they
+# contain "how much"/"highest" (e.g. "how much higher outside the EEA").
+_DOC_ENTITY_RE = re.compile(
+    r"\b(eea|eba|ecb|psd2|cross-border|according to|authors?|report)\b", re.I
+)
+
+
 def detect_intent_heuristic(query: str) -> Tuple[str, float]:
     """
     Fast heuristic intent classifier.
@@ -86,16 +107,26 @@ def detect_intent_heuristic(query: str) -> Tuple[str, float]:
     if any(k in q for k in timeseries_kw):
         return "analytics", 0.95
 
+    is_doc_question = bool(_DOC_ENTITY_RE.search(q))
+
+    if (
+        not is_doc_question
+        and _RANKING_RE.search(q)
+        and _DATA_ENTITY_RE.search(q)
+    ):
+        return "analytics", 0.90
+
     conceptual_kw = (
         "what are", "explain", "describe", "definition",
         "jelaskan", "apa itu",
-        "merchant", "merchants", "mcc", "kategori merchant",
+        "mcc",
         "eea", "eba", "ecb", "psd2", "cross-border",
     )
 
     if any(k in q for k in conceptual_kw):
         return "rag", 0.90
 
+    # Ambiguous (e.g. bare "merchant" mentions): let the LLM decide.
     return "rag", 0.40
 
 
@@ -264,13 +295,13 @@ def run_query(raw_query: str, detected_lang: str = None) -> Dict[str, Any]:
                 "error": None,
                 "result": {"type": "analytics", "analytics": analytics_res},
             }
-        except Exception as e:
+        except Exception:
             logger.error("[orchestrator] analytics failed", exc_info=True)
             return {
                 "query": query,
                 "intent": "analytics",
                 "result": None,
-                "error": str(e),
+                "error": "Analytics pipeline failed.",
             }
 
     # ------------------------------------------------------------------
@@ -303,11 +334,19 @@ def run_query(raw_query: str, detected_lang: str = None) -> Dict[str, Any]:
 
         # Low-confidence fallback
         if final_score < 0.12:
-            fallback_msg = (
-                "Maaf, dokumen yang tersedia tidak cukup untuk menjawab pertanyaan."
-                if user_lang == "id"
-                else "Sorry, the documents do not contain enough information."
-            )
+            if rag_res.get("retrieval_status") == "unavailable":
+                fallback_msg = (
+                    "Maaf, pencarian dokumen sedang tidak tersedia. Coba lagi nanti."
+                    if user_lang == "id"
+                    else "Sorry, the document search is temporarily unavailable. "
+                    "Please try again later."
+                )
+            else:
+                fallback_msg = (
+                    "Maaf, dokumen yang tersedia tidak cukup untuk menjawab pertanyaan."
+                    if user_lang == "id"
+                    else "Sorry, the documents do not contain enough information."
+                )
 
             rag_res.update(
                 {"answer": fallback_msg, "insight": None, "score": scoring}
@@ -344,11 +383,11 @@ def run_query(raw_query: str, detected_lang: str = None) -> Dict[str, Any]:
             "result": {"type": "rag", **rag_res},
         }
 
-    except Exception as e:
+    except Exception:
         logger.error("[orchestrator] RAG pipeline failed", exc_info=True)
         return {
             "query": query,
             "intent": "rag",
             "result": None,
-            "error": str(e),
+            "error": "RAG pipeline failed.",
         }

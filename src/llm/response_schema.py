@@ -108,6 +108,10 @@ class AnalyticsResponse(BaseModel):
         default=None,
         description="Chart-friendly representation of the analytics result."
     )
+    sql: Optional[str] = Field(
+        default=None,
+        description="The exact SQL executed against fraud_transactions; grounds the answer."
+    )
     confidence: float = Field(
         default=0.7,
         ge=0.0,
