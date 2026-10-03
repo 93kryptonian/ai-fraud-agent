@@ -1,3 +1,11 @@
+> **Status: aspirational design note.** The implemented, authoritative
+> description of observability (events, request correlation, cost, metrics,
+> endpoints and their privacy rules) is
+> [observability-contract.md](observability-contract.md). Where this document
+> mentions `query_id` or tracing it predates that work; `request_id` is the
+> canonical identifier. Rewriting this document is deferred to the
+> documentation milestone.
+
 # Observability Design
 
 This document explains how observability is designed in the Fraud Agents Enhanced system.
