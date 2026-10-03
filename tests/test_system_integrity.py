@@ -12,7 +12,7 @@ IMPORTANT:
 - They validate architecture integrity & CI safety
 """
 
-import pytest
+import pytest  # noqa: F401
 
 
 # ============================================================
@@ -21,18 +21,18 @@ import pytest
 
 def test_core_imports():
     """Ensure all major modules import without side effects."""
-    import src.rag.rag_chain
-    import src.rag.ranking
-    import src.rag.question_rewrite
+    import src.rag.rag_chain  # noqa: F401
+    import src.rag.ranking  # noqa: F401
+    import src.rag.question_rewrite  # noqa: F401
 
-    import src.llm.llm_client
-    import src.llm.prompts
-    import src.llm.response_schema
-    import src.llm.scoring
+    import src.llm.llm_client  # noqa: F401
+    import src.llm.prompts  # noqa: F401
+    import src.llm.response_schema  # noqa: F401
+    import src.llm.scoring  # noqa: F401
 
-    import src.safety.guardrails
-    import src.analytics.fraud_analytics
-    import src.db.supabase_client
+    import src.safety.guardrails  # noqa: F401
+    import src.analytics.fraud_analytics  # noqa: F401
+    import src.db.supabase_client  # noqa: F401
 
 
 # ============================================================
