@@ -56,6 +56,38 @@ def event_records():
         lg.removeHandler(h)
 
 
+@pytest.fixture
+def project_logs():
+    """
+    Every log record emitted by the project's own loggers during the test.
+
+    The project's get_logger() sets propagate=False (to avoid double logging),
+    so pytest's caplog, a root-logger handler, only sees those loggers when the
+    pytest version happens to attach itself to non-propagating loggers (9.1.x
+    does; the pinned 9.0.1 does not). This fixture attaches a handler to the
+    root logger AND to each existing non-propagating logger explicitly, so the
+    assertions below do not depend on that pytest behaviour.
+    """
+    records = []
+
+    class _H(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _H(level=logging.DEBUG)
+    attached = [logging.getLogger()]
+    for lg in list(logging.root.manager.loggerDict.values()):
+        if isinstance(lg, logging.Logger) and not lg.propagate:
+            attached.append(lg)
+    for lg in attached:
+        lg.addHandler(handler)
+    try:
+        yield records
+    finally:
+        for lg in attached:
+            lg.removeHandler(handler)
+
+
 def _events(records, name="rate_limit.blocked"):
     return [e for e in (json.loads(r) for r in records) if e["event"] == name]
 
@@ -160,31 +192,29 @@ def test_throttled_control_plane_emits_no_event_but_still_429(event_records, mon
     assert _events(event_records) == []
 
 
-def test_throttled_control_plane_is_still_logged(monkeypatch, caplog):
+def test_throttled_control_plane_is_still_logged(monkeypatch, project_logs):
     client = _limited_client(monkeypatch)
-    caplog.set_level(logging.WARNING)
     client.get("/health")
     client.get("/metrics")
-    assert any("route=control_plane" in r.getMessage() for r in caplog.records)
+    assert any("route=control_plane" in r.getMessage() for r in project_logs)
 
 
 # =============================================================================
 # No client identifiers (events or logs)
 # =============================================================================
 
-def test_no_client_identifier_in_event_or_log(event_records, monkeypatch, caplog):
+def test_no_client_identifier_in_event_or_log(event_records, monkeypatch, project_logs):
     monkeypatch.setattr(rl, "TRUST_FORWARDED_FOR", True)
     monkeypatch.setattr(rl, "TRUSTED_PROXY_HOPS", 1)
-    caplog.set_level(logging.DEBUG)
     client = _limited_client(monkeypatch)
     headers = {"X-Forwarded-For": "203.0.113.77"}
     client.post("/query", json=_BODY, headers=headers)
     assert client.post("/query", json=_BODY, headers=headers).status_code == 429
 
-    haystack = "\n".join(event_records + [r.getMessage() for r in caplog.records])
+    haystack = "\n".join(event_records + [r.getMessage() for r in project_logs])
     for identifier in ("203.0.113.77", "testclient", "127.0.0.1", "ip="):
         assert identifier not in haystack
-    warn = [r.getMessage() for r in caplog.records if "[rate_limit] Blocked" in r.getMessage()]
+    warn = [r.getMessage() for r in project_logs if "[rate_limit] Blocked" in r.getMessage()]
     assert warn and all("route=/query" in w and "count=" in w and "ip" not in w for w in warn)
 
 
@@ -199,7 +229,7 @@ def test_event_metadata_has_only_the_route_key(event_records, monkeypatch):
 # Fail-open: telemetry never changes the limiter's decision
 # =============================================================================
 
-def test_telemetry_failure_still_returns_429(monkeypatch, caplog):
+def test_telemetry_failure_still_returns_429(monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("telemetry exploded")
 
