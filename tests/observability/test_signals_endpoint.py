@@ -279,12 +279,16 @@ def test_cors_headers_are_present(monkeypatch):
 
 
 # =============================================================================
-# Scope: no Prometheus implementation yet (M8.3)
+# /signals stays the analytical JSON snapshot (Prometheus is a separate endpoint)
 # =============================================================================
 
-def test_no_metrics_endpoint_or_prometheus_dependency(monkeypatch):
+def test_signals_stays_json_and_does_not_become_a_prometheus_endpoint(monkeypatch):
     app = _app(monkeypatch)
-    assert "/metrics" not in app.openapi()["paths"]
-    assert _client(app).get("/metrics", headers=AUTH).status_code == 404
-    text = open("api/signals.py", encoding="utf-8").read()
-    assert "prometheus" not in text.lower().replace("prometheus text", "")
+    resp = _client(app).get("/signals", headers=AUTH)
+    assert resp.headers["content-type"].startswith("application/json")
+    assert "# TYPE" not in resp.text
+
+    import ast
+    tree = ast.parse(open("api/signals.py", encoding="utf-8").read())
+    imported = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    assert "prometheus_client" not in imported
