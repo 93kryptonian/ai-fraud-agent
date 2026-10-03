@@ -72,6 +72,12 @@ DOMAIN_KEYWORDS = [
     r"eba",
     r"ecb",
     r"cross[-\s]?border fraud",
+    # Dataset vocabulary: analytics questions like "monthly trend of
+    # transactions" or "top merchants" are in scope even without the word
+    # "fraud" (the analytics/intent stages still decide how to answer).
+    r"transactions?",
+    r"merchants?",
+    r"merchant categor(?:y|ies)",
 
     # Indonesian
     r"penipuan",
@@ -81,6 +87,7 @@ DOMAIN_KEYWORDS = [
     r"kejahatan keuangan",
     r"pemalsuan kartu",
     r"transaksi lintas negara",
+    r"transaksi",
 ]
 
 # =============================================================================
@@ -147,6 +154,16 @@ def contains_only_noise(text: str) -> bool:
 # DOMAIN ENFORCEMENT
 # =============================================================================
 
+# Short acronyms must match as whole words ("eba" must not match "member");
+# longer terms only need a leading boundary so "fraud" still matches
+# "fraudulent"/"fraudster".
+_ACRONYMS = {"aml", "eba", "ecb", "psd2"}
+
+
+def _with_word_boundary(kw: str) -> str:
+    return rf"\b{kw}\b" if kw in _ACRONYMS else rf"\b{kw}"
+
+
 def is_domain_related(query: str) -> bool:
     """
     Check whether the query is related to fraud / financial crime.
@@ -154,7 +171,7 @@ def is_domain_related(query: str) -> bool:
     lowered = query.lower()
 
     for kw in DOMAIN_KEYWORDS:
-        if re.search(kw, lowered):
+        if re.search(_with_word_boundary(kw), lowered):
             return True
 
     return False
