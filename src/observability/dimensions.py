@@ -50,11 +50,24 @@ FORBIDDEN_KEYS: FrozenSet[str] = frozenset({
 })
 
 # Exception class names allowed as an error label; anything else -> "other".
+# `type(e).__name__` is what reaches telemetry, so a subclass is matched by its
+# OWN name (psycopg2 raises QueryCanceled, not its base OperationalError; the
+# OpenAI SDK wraps transport errors as APIConnectionError / APITimeoutError, so
+# raw httpx classes only reach telemetry through the PostgREST retrieval path).
+# Each entry below the first group was added only after an audit showed a
+# current production path can raise it; see docs/observability-contract.md §9.
 ERROR_TYPES: FrozenSet[str] = frozenset({
+    # built-ins and our own errors
     "ConnectionError", "TimeoutError", "ValueError", "KeyError", "TypeError",
     "RuntimeError", "OSError", "AttributeError", "IndexError",
-    "LLMExhaustedRetriesError", "APIConnectionError", "APITimeoutError",
-    "RateLimitError", "OperationalError",
+    "LLMExhaustedRetriesError",
+    # OpenAI SDK (llm.failed): the SDK's own retries are exhausted first
+    "APIConnectionError", "APITimeoutError", "RateLimitError",
+    "AuthenticationError", "InternalServerError",
+    # database (analytics): connect failures vs the statement_timeout
+    "OperationalError", "QueryCanceled",
+    # PostgREST / httpx (retrieval.failed): transport errors are not wrapped
+    "ConnectError", "ReadTimeout", "ConnectTimeout", "APIError",
 })
 
 
