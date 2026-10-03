@@ -35,6 +35,9 @@ This allows:
 ## CI / CD Responsibilities
 
 Continuous Integration ensures:
+- Linting is reproducible (ruff is pinned in the workflow and its rules are
+  selected explicitly in `ruff.toml`, so a new ruff release cannot change the
+  lint policy on its own)
 - Code imports correctly
 - No accidental LLM calls in CI
 - Routing logic remains callable
