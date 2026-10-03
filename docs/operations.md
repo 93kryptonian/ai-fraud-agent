@@ -119,6 +119,10 @@ Things to know before relying on them:
 - On the free tier, a scraper keeps the instance awake and uses up the free
   instance hours.
 - A 404 from these endpoints means disabled or no token configured.
+- The signals and metrics outputs are privacy-bounded, but application logs
+  are not: INFO logs currently contain raw query text and uvicorn's access log
+  contains the connection peer's address. Limit who can read the logs (see the
+  contract, section 6).
 
 Details, the metric inventory and the privacy rules are in
 [observability-contract.md](observability-contract.md) (sections 13-15).
