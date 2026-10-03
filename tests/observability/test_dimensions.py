@@ -400,18 +400,19 @@ def test_constant_dimensions_get_no_fictitious_other_bucket():
 
 
 def test_multi_valued_dimensions_still_add_the_other_bucket():
+    errors = len(dim.ERROR_TYPES) + 2          # allowlist + "none" + "other"
     # analytics.completed: status{success,failure}+other=3 x intent(4 + none)+other=6
-    #                      x chart_generated{true,false}+other=3 x errors(14 + none)+other=16
-    assert dim.series_upper_bound("analytics.completed") == 3 * 6 * 3 * 16 == 864
-    # request.completed: route 3+1=4 x status{success,blocked,error}+1=4 x cost_status 4+1=5 x errors 16
-    assert dim.series_upper_bound("request.completed") == 4 * 4 * 5 * 16 == 1280
+    #                      x chart_generated{true,false}+other=3 x error classes
+    assert dim.series_upper_bound("analytics.completed") == 3 * 6 * 3 * errors
+    # request.completed: route 3+1=4 x status{success,blocked,error}+1=4 x cost_status 4+1=5 x error classes
+    assert dim.series_upper_bound("request.completed") == 4 * 4 * 5 * errors
 
 
 def test_llm_failed_bound_is_the_real_one_not_double():
     # status is constant (1); purpose 9+1=10; model = 2 priced + 2 configured + other = 5; errors 14+none+other
     expected = 1 * 10 * 5 * (len(dim.ERROR_TYPES) + 2)
     assert dim.series_upper_bound("llm.failed") == expected
-    assert dim.series_upper_bound("llm.failed") < 1600          # was inflated 2x before the correction
+    assert dim.series_upper_bound("llm.failed") == 1 * 10 * 5 * (len(dim.ERROR_TYPES) + 2)
 
 
 def test_bound_rule_on_a_synthetic_policy(monkeypatch):

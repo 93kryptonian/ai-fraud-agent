@@ -332,6 +332,23 @@ Rules:
   allowlist normalization (known exception class, else `other`; `none` when
   absent). Raw exception class names must never be emitted as metric label
   values. A metric uses at most one error-class dimension per event.
+  The allowlist grows only when a current production path can raise the
+  class (not merely because an SDK defines it). Beyond the built-ins and
+  `LLMExhaustedRetriesError` it names: the OpenAI SDK classes the LLM path can
+  raise (`APIConnectionError`, `APITimeoutError`, `RateLimitError`,
+  `AuthenticationError`, `InternalServerError`); the database classes
+  `OperationalError` (connect failures) and `QueryCanceled` (the
+  `statement_timeout`; psycopg2 raises it by its own name, not its base); and
+  the PostgREST/httpx classes the retrieval RPC can raise unwrapped
+  (`ConnectError`, `ReadTimeout`, `ConnectTimeout`, `APIError`). Deliberately
+  not included (not shown reachable on the current path or configuration):
+  `BadRequestError`, `NotFoundError`, `PermissionDeniedError`,
+  `APIStatusError`, `ProgrammingError`, the psycopg2 SQLSTATE subclasses,
+  `SupabaseException`, `JSONDecodeError`, `ValidationError`.
+  The PostgREST/httpx entries were established against the installed client
+  versions; the pinned versions have not yet been verified (pre-publish
+  check). `ConnectionError`, `TimeoutError` and `OSError` have no known
+  production source and remain only because tests use them.
 - **`model`, `from_model`, `to_model`** are bounded to priced or configured
   models, else `other`.
 - **Forbidden keys** (raw query, SQL, prompts/completions, error text,
@@ -445,26 +462,26 @@ Rules:
 
 | Event | Series upper bound |
 |---|---|
-| `analytics.completed` | 864 |
-| `analytics.sql.completed` | 288 |
-| `analytics.sql.failed` | 288 |
+| `analytics.completed` | 1242 |
+| `analytics.sql.completed` | 414 |
+| `analytics.sql.failed` | 414 |
 | `guardrails.blocked` | 18 |
 | `guardrails.completed` | 18 |
 | `intent.completed` | 48 |
-| `intent.failed` | 16 |
+| `intent.failed` | 23 |
 | `language_detection.completed` | 1 |
 | `language_detection.failed` | 1 |
 | `llm.completed` | 50 |
-| `llm.failed` | 800 |
+| `llm.failed` | 1150 |
 | `llm.fallback` | 250 |
 | `ranking.completed` | 1 |
-| `ranking.failed` | 16 |
+| `ranking.failed` | 23 |
 | `ranking.skipped` | 1 |
 | `rate_limit.blocked` | 4 |
-| `request.completed` | 1280 |
+| `request.completed` | 1840 |
 | `request.started` | 4 |
 | `retrieval.completed` | 1 |
-| `retrieval.failed` | 16 |
+| `retrieval.failed` | 23 |
 | `retrieval.skipped` | 3 |
 
 Cardinality cap per event: 2000.
