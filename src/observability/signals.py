@@ -45,9 +45,10 @@ SUM = "sum"
 HISTOGRAM = "histogram"
 
 _SERIES_NOTE = (
-    "Cumulative since replay start; no time windows. request volume is not "
-    "HTTP volume (rate-limited requests emit no events). Percentiles are "
-    "bucket upper-bound estimates."
+    "Cumulative since the aggregator started; no time windows. Instrumented "
+    "application request volume is requests_total + rate_limited_total; it is "
+    "not every possible HTTP request. Percentiles are bucket upper-bound "
+    "estimates."
 )
 
 

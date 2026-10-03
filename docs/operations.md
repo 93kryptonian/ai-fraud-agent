@@ -104,3 +104,21 @@ Key considerations:
 
 This avoids premature optimization while remaining production-aligned.
 
+## Operational Signals (optional)
+
+The service can expose live operational signals (request, LLM, retrieval and
+rate-limit counters and latency histograms). They are **off by default**.
+
+To enable: set `SIGNALS_ENABLED=true` and a secret `SIGNALS_TOKEN` in the
+host's environment, then read `GET /metrics` (Prometheus text) or
+`GET /signals` (JSON) with `Authorization: Bearer <token>`.
+
+Things to know before relying on them:
+- State is in memory and per process: run one worker; counters reset on every
+  restart or spin-down.
+- On the free tier, a scraper keeps the instance awake and uses up the free
+  instance hours.
+- A 404 from these endpoints means disabled or no token configured.
+
+Details, the metric inventory and the privacy rules are in
+[observability-contract.md](observability-contract.md) (sections 13-15).

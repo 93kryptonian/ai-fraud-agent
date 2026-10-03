@@ -1,10 +1,12 @@
 # Observability Contract (reconciled after M6, through M7.3)
 
-Status: **reconciled after M6, updated for M7.1.** M6 is implemented and
-frozen at `513f4b4`. Sections marked **[implemented]** describe what the code
-emits today (M7.1 request-level cost is implemented, §8). Sections marked
-**[design-only]** describe M7 design direction; nothing in them is
-implemented yet. (M7.2 dimension policy, §9, M7.3 operational signals, §13, the M8.1 live feed, the M8.2 `/signals` endpoint, the M8.3 `/metrics` exposition and the M8.4 `rate_limit.blocked` event, §14, are implemented.)
+Status: **reconciled after M6 and updated through M8.4.** M6 is implemented
+and frozen at `513f4b4`; M7.1-M7.3 and M8.1-M8.4 are implemented on top of it.
+Every section describes what the code emits or does today: request-level cost
+(§8), the metric dimension policy (§9), operational signals (§13), the live
+feed, `/signals`, `/metrics` and `rate_limit.blocked` (§14), and the operating
+notes (§15). No section is design-only any more; a section that describes
+something not yet built must say so explicitly.
 
 This document began as the M2 contract. It has been reconciled against the
 actual code: events the M2 text promised but the code never emitted were
@@ -541,25 +543,48 @@ Observations (descriptive, not contract):
 
 ### Finding: repeated language detection
 
-`detect_language()` currently executes three times along the `/query` path:
+`detect_language()` is called three times along the `/query` path:
 
 - `src/safety/guardrails.py::validate_query`
 - `src/orchestrator.py::run_query` (ignores the `detected_lang` already
   passed in by the router)
 - `src/rag/question_rewrite.py::process_query`
 
+Each call tries a keyword heuristic first and makes an LLM call
+(`purpose=language_detection`) **only when no keyword matches**. The traces in
+this section show three LLM calls because their text matched no keyword.
+
 This is recorded as an **observability finding**. M7 measures it
 (`llm_calls_per_request{purpose="language_detection"}`, §13); consolidation
 is outside M7 and is not part of its scope.
+
+### Finding: guardrails can call the LLM before rejecting
+
+`validate_query` calls `detect_language()` **before** the injection and domain
+checks. A query that matches none of the keywords (for example an injection
+string, gibberish, or non-English text) therefore costs an LLM call and its
+retry backoff before being rejected, even though the module describes the
+guardrails as deterministic. This was observed against a live server: a
+blocked `/query` took about 12 s (four failed attempts, no API key
+configured). With a key, each such request is a billable call. The per-IP rate
+limiter bounds it but does not remove it.
+
+Recorded here as an observed behaviour only. Changing it alters guardrail
+runtime behaviour, cost and latency, so it needs its own design pass and is
+**not** part of M7 or M8.
 
 ---
 
 ## 12. Non-goals
 
-For M7.0 and M7 generally: no Prometheus implementation, no OpenTelemetry,
-no Grafana or dashboards, no event database or broker, no alerting, and no
-language-detection refactor. A later exposure/export layer (M8) translates
-*from* these events; the application never calls a vendor SDK directly.
+Never in scope: OpenTelemetry or any vendor SDK in application code, an event
+database or broker, dashboards, alerting, sampling or backpressure for the
+event stream, persistence of signal state, and the language-detection and
+guardrail refactors recorded in §11.
+
+What changed from the M2/M7.0 wording: a Prometheus *text exposition* (M8.3) is
+implemented, hand-rendered with no `prometheus_client`. The application still
+never calls a vendor SDK; an external scraper pulls from `/metrics`.
 
 ---
 
@@ -846,6 +871,58 @@ router runs.
   lifecycle; `rate_limited_total` = requests the limiter rejected;
   instrumented application volume = their sum. That is still not every
   possible HTTP request to the server.
+
+---
+
+## 15. Operating notes [implemented]
+
+How the M7/M8 signals behave when this service is actually run. Nothing here
+is enforced by code beyond what §13 and §14 already describe.
+
+**Enabling.** The feed and both endpoints are off by default and nothing in
+`render.yaml` turns them on. To use them set, in the host's environment (on
+Render: the service's environment settings, with the token as a secret and
+never committed):
+
+| Variable | Purpose |
+|---|---|
+| `SIGNALS_ENABLED=true` | start the live feed |
+| `SIGNALS_TOKEN=<secret>` | bearer token; without it `/signals` and `/metrics` stay closed (404) |
+| `TRUST_FORWARDED_FOR=true` | already set in `render.yaml`; per-client rate limiting behind Render's proxy |
+| `RATE_LIMIT_PER_MINUTE` | default `20` per client IP, shared by every route including `/metrics` |
+
+Verify with `GET /health`, then `GET /metrics` with
+`Authorization: Bearer <token>`. A 404 means the feed is disabled or the token
+is unset; 401 means the credential is wrong.
+
+**One process.** The aggregator is per process. The Docker image runs a single
+uvicorn worker. With more than one worker (or instance) each has its own
+counters, and a scrape reaches an arbitrary one; do not run multiple workers
+and trust the totals.
+
+**Counters reset.** State is in memory only. A restart or spin-down resets
+every counter to zero; `signals_start_time_seconds` changes when it happens,
+and a scraper's counter-reset handling covers it. Nothing is persisted.
+
+**Scraping and the free tier.** A Render free-tier web service spins down when
+idle. A scraper polling `/metrics` (for example every 30 s) counts as traffic,
+so it keeps the instance awake and consumes the monthly free instance hours.
+Choose the interval, or scrape only on demand, with that in mind. The scraper
+also shares the per-IP rate-limit window with any other traffic from the same
+address.
+
+**Volume and cost caveats.**
+- `requests_total + rate_limited_total` is the instrumented application
+  volume, not every possible HTTP request (§14, M8.4).
+- A blocked-request flood emits one `rate_limit.blocked` event per blocked
+  request. Exact counting was chosen over sampling; sampling would be a
+  separate design.
+- Each emitted event is also parsed by the live handler (about 13 us per event
+  in a local benchmark; not a guarantee on other hardware).
+- Guardrails can make an LLM call before rejecting a query (§11).
+
+**Privacy.** Events and signals carry bounded dimensions only; the client IP is
+never emitted or logged by the rate limiter (§6).
 
 ---
 

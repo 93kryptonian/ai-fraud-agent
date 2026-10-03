@@ -462,3 +462,9 @@ def test_runtime_captured_events_replay_with_nothing_unclassified(runtime_events
                used_fallback_sql="true") == 1
     assert val(snap, "llm_fallbacks_total", purpose="rag_answer", reason="budget_threshold") == 1
     json.dumps(snap)   # serializable
+
+
+def test_snapshot_note_describes_the_current_volume_semantics():
+    note = sig.replay([])["meta"]["note"]
+    assert "rate_limited_total" in note and "requests_total" in note   # volume = both, post-M8.4
+    assert "emit no events" not in note and "replay" not in note       # stale pre-M8.4 wording
