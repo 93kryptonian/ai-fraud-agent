@@ -243,10 +243,11 @@ def test_raw_query_text_never_appears_in_events(event_records):
 
 
 # =============================================================================
-# 5. request.completed never claims cost/fallback fields it can't back yet
+# 5. request.completed never claims fallback fields it can't back yet
+#    (cost fields are real as of M7.1 — see test_cost_semantics.py)
 # =============================================================================
 
-def test_request_completed_omits_unimplemented_cost_fields(event_records):
+def test_request_completed_omits_unimplemented_fallback_fields(event_records):
     from fastapi.testclient import TestClient
     from api.main import app
 
@@ -255,6 +256,5 @@ def test_request_completed_omits_unimplemented_cost_fields(event_records):
 
     events = _parsed(event_records)
     completed_evt = next(e for e in events if e["event"] == "request.completed")
-    assert "cost_usd_total" not in completed_evt["metadata"]
     assert "fallback_used" not in completed_evt["metadata"]
     assert "fallback_reason" not in completed_evt["metadata"]

@@ -30,7 +30,7 @@ from src.analytics.fraud_analytics import run_analytics
 from src.safety.guardrails import validate_query
 from src.llm.response_schema import ErrorResponse
 from src.observability.context import new_request_id, set_request_id
-from src.observability.cost import reset_request_cost
+from src.observability.cost import cost_metadata, reset_request_cost
 from src.observability.events import emit_event, query_hash
 from src.observability.timing import elapsed_timer
 
@@ -89,7 +89,7 @@ async def query_endpoint(req: QueryRequest):
             if not ok:
                 emit_event(
                     "request.completed", step="request", status="blocked",
-                    duration_ms=elapsed(), metadata={"route": "/query"},
+                    duration_ms=elapsed(), metadata={"route": "/query", **cost_metadata()},
                 )
                 return {
                     "query": req.query,
@@ -101,14 +101,14 @@ async def query_endpoint(req: QueryRequest):
             result = run_query(cleaned_or_msg, detected_lang=lang)
             emit_event(
                 "request.completed", step="request", status="success",
-                duration_ms=elapsed(), metadata={"route": "/query"},
+                duration_ms=elapsed(), metadata={"route": "/query", **cost_metadata()},
             )
             return result
         except Exception as e:
             emit_event(
                 "request.completed", step="request", status="error",
                 duration_ms=elapsed(),
-                metadata={"route": "/query", "error_type": type(e).__name__},
+                metadata={"route": "/query", **cost_metadata(), "error_type": type(e).__name__},
             )
             raise
 
@@ -134,7 +134,7 @@ async def rag_endpoint(req: RAGRequest):
             if not ok:
                 emit_event(
                     "request.completed", step="request", status="blocked",
-                    duration_ms=elapsed(), metadata={"route": "/rag"},
+                    duration_ms=elapsed(), metadata={"route": "/rag", **cost_metadata()},
                 )
                 return JSONResponse(
                     status_code=400,
@@ -147,14 +147,14 @@ async def rag_endpoint(req: RAGRequest):
             )
             emit_event(
                 "request.completed", step="request", status="success",
-                duration_ms=elapsed(), metadata={"route": "/rag"},
+                duration_ms=elapsed(), metadata={"route": "/rag", **cost_metadata()},
             )
             return result
         except Exception as e:
             emit_event(
                 "request.completed", step="request", status="error",
                 duration_ms=elapsed(),
-                metadata={"route": "/rag", "error_type": type(e).__name__},
+                metadata={"route": "/rag", **cost_metadata(), "error_type": type(e).__name__},
             )
             raise
 
@@ -178,7 +178,7 @@ async def analytics_endpoint(req: AnalyticsRequest):
             if not ok:
                 emit_event(
                     "request.completed", step="request", status="blocked",
-                    duration_ms=elapsed(), metadata={"route": "/analytics"},
+                    duration_ms=elapsed(), metadata={"route": "/analytics", **cost_metadata()},
                 )
                 return JSONResponse(
                     status_code=400,
@@ -191,13 +191,13 @@ async def analytics_endpoint(req: AnalyticsRequest):
             )
             emit_event(
                 "request.completed", step="request", status="success",
-                duration_ms=elapsed(), metadata={"route": "/analytics"},
+                duration_ms=elapsed(), metadata={"route": "/analytics", **cost_metadata()},
             )
             return result
         except Exception as e:
             emit_event(
                 "request.completed", step="request", status="error",
                 duration_ms=elapsed(),
-                metadata={"route": "/analytics", "error_type": type(e).__name__},
+                metadata={"route": "/analytics", **cost_metadata(), "error_type": type(e).__name__},
             )
             raise

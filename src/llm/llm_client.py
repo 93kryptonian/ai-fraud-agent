@@ -19,12 +19,12 @@ Design goals:
 import os
 import re
 import time
-from typing import Optional, Type, Any, Dict, List
+from typing import Optional, Tuple, Type, Any, Dict, List
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, ValidationError
 
-from src.observability.cost import add_request_cost
+from src.observability.cost import add_request_cost, add_unpriced_response
 from src.observability.events import emit_event
 from src.observability.timing import elapsed_timer
 from src.utils.logger import get_logger
@@ -115,27 +115,39 @@ def get_openai_client():
 # COST ESTIMATION
 # =============================================================================
 
-# USD per 1K tokens (approx, intentionally conservative)
-PRICES_PER_1K: Dict[str, float] = {
-    "gpt-4o": 0.0025,
-    "gpt-4o-mini": 0.00015,
+# USD per 1M tokens: (input, output). Exact requested-model-name match only —
+# an alias ("gpt-4o-mini") does not imply its dated snapshots, which may be
+# priced differently; add a snapshot explicitly if it is ever configured.
+# Verify against the provider's pricing page whenever this table changes.
+# Cached-input discounts are not modelled (estimate is an upper bound there).
+PRICES_PER_1M: Dict[str, Tuple[float, float]] = {
+    "gpt-4o": (2.50, 10.00),
+    "gpt-4o-mini": (0.15, 0.60),
 }
+
+_WARNED_UNPRICED_MODELS: set = set()
 
 
 def estimate_cost(
     model: str,
     prompt_tokens: int,
     completion_tokens: int,
-) -> float:
+) -> Optional[float]:
     """
-    Estimate request cost in USD.
-    Returns 0.0 if model pricing is unknown.
-    """
-    price = PRICES_PER_1K.get(model)
-    if not price:
-        return 0.0
+    Estimate request cost in USD from separate input/output rates.
 
-    return round((prompt_tokens + completion_tokens) / 1000 * price, 6)
+    Returns None when the model has no known price — unknown is never $0.00.
+    """
+    price = PRICES_PER_1M.get(model)
+    if price is None:
+        return None
+
+    input_per_1m, output_per_1m = price
+    return round(
+        prompt_tokens / 1_000_000 * input_per_1m
+        + completion_tokens / 1_000_000 * output_per_1m,
+        6,
+    )
 
 # =============================================================================
 # LLM CLIENT
@@ -275,10 +287,10 @@ class LLMClient:
                         **extra_params,
                     )
 
-                    text = (response.choices[0].message.content or "").strip()
-
                     # -------------------------------
-                    # Cost tracking
+                    # Cost tracking — recorded the moment a response
+                    # arrives, BEFORE any parsing: a billable response whose
+                    # parsing then raises (and is retried) must still count.
                     # -------------------------------
                     usage = getattr(response, "usage", None)
                     prompt_tokens = completion_tokens = None
@@ -287,12 +299,22 @@ class LLMClient:
                         prompt_tokens = usage.prompt_tokens or 0
                         completion_tokens = usage.completion_tokens or 0
                         cost = estimate_cost(selected_model, prompt_tokens, completion_tokens)
+
+                    if cost is None:
+                        # Missing usage or unpriced model: cost unknown, never
+                        # $0. The process-global guard cannot see it either.
+                        add_unpriced_response()
+                        if selected_model not in _WARNED_UNPRICED_MODELS:
+                            _WARNED_UNPRICED_MODELS.add(selected_model)
+                            logger.warning(
+                                f"[llm] No attributable cost for model={selected_model}; "
+                                "budget guard cannot account for this usage"
+                            )
+                    else:
                         SESSION_COST_USD += cost
-                        # P2: additive, request-scoped accumulation for
-                        # trustworthy per-request cost attribution — does
-                        # not replace or affect the process-global budget
-                        # guard above. See src/observability/cost.py.
                         add_request_cost(cost)
+
+                    text = (response.choices[0].message.content or "").strip()
 
                     # -------------------------------
                     # Optional schema validation

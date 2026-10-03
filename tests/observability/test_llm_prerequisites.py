@@ -59,11 +59,11 @@ def _no_sleep(monkeypatch):
 def _reset_request_cost():
     from src.observability import cost as cost_module
 
-    token = cost_module._request_cost_usd.set(0.0)
+    token = cost_module._request_cost.set(cost_module.RequestCost())
     try:
         yield
     finally:
-        cost_module._request_cost_usd.reset(token)
+        cost_module._request_cost.reset(token)
 
 
 # =============================================================================
