@@ -4,7 +4,7 @@ Status: **reconciled after M6, updated for M7.1.** M6 is implemented and
 frozen at `513f4b4`. Sections marked **[implemented]** describe what the code
 emits today (M7.1 request-level cost is implemented, §8). Sections marked
 **[design-only]** describe M7 design direction; nothing in them is
-implemented yet. (M7.2 dimension policy, §9, and M7.3 operational signals, §13, are implemented.)
+implemented yet. (M7.2 dimension policy, §9, M7.3 operational signals, §13, and the M8.1 live feed, §14, are implemented.)
 
 This document began as the M2 contract. It has been reconciled against the
 actual code: events the M2 text promised but the code never emitted were
@@ -645,6 +645,82 @@ calls), `llm_fallback_rate` (fallbacks / LLM calls), `retrieval_empty_rate`
 (empty / successful retrievals), `retrieval_skip_rate`,
 `retrieval_failure_rate`, `ranking_failure_rate`, `analytics_failure_rate`,
 `analytics_sql_fallback_rate`.
+
+---
+
+## 14. Exposure design (M8) [M8.1 implemented; M8.2-M8.4 design-locked, not implemented]
+
+M8 exposes the M7.3 signals without coupling to a vendor. Target: **pull-based,
+in-process** signals; JSONL replay (§13 CLI) remains the offline path. Push to
+a vendor backend, OpenTelemetry, dashboards and alerting are out of M8.
+
+```text
+emit_event()
+    |-- JSONL StreamHandler                 (unchanged)
+    '-- optional SignalsHandler  [M8.1]
+              |
+              v
+        process Aggregator  (lock around mutation, in the adapter)
+              |
+              v
+          snapshot()
+              |-- M8.2  authenticated JSON endpoint
+              '-- M8.3  Prometheus text exposition  -> external scraper
+```
+
+**M8.1: live feed adapter [implemented]** (`src/observability/live.py`).
+- Consumes only events emitted through the `observability.events` logger;
+  `events.py` knows nothing about it.
+- The pure `Aggregator` stays unaware of logging, threads, HTTP, environment
+  variables and vendors; the lock and process-level ownership live in the
+  adapter.
+- **Opt-in and off by default**: `SIGNALS_ENABLED=true` enables it (read when
+  the app is created). Disabled means no handler and no aggregator
+  instantiated: no collection overhead.
+- **Fail-open**: the handler swallows every exception (including logging's
+  own error path) and counts it in `meta.handler_errors`; non-JSON records on
+  the events logger are counted in `meta.ignored_records`. A telemetry
+  failure never becomes an application failure.
+- **State is process-local and non-durable.** A restart or spin-down (the
+  Render free tier spins down when idle) starts a fresh aggregator;
+  `meta.started_at_unix` records when, so a consumer can detect the reset.
+  Counters are cumulative since then. Scaling out gives per-instance state.
+- No endpoint exists yet (M8.2).
+
+**M8.2: JSON snapshot endpoint [design-locked].** `GET /signals`, disabled by
+default.
+- `SIGNALS_ENABLED=false` -> 404, no handler attached, no aggregator.
+- Enabled -> requires `Authorization: Bearer <token>`; missing or wrong token
+  is rejected. There is no partially redacted public variant.
+- The token never appears in telemetry or error responses.
+- Contains only bounded dimensions (no `request_id`, `query_hash` or content).
+- Returns the M7.3 snapshot, including rates and percentiles as debugging
+  conveniences.
+
+**M8.3: Prometheus text exposition [design-locked].** A separate mapping from
+the analytical snapshot; the exposition format is not the internal model.
+- Hand-rendered; no `prometheus_client`, no global registry.
+- Must emit `# HELP` / `# TYPE`, cumulative histogram buckets with `+Inf`,
+  `_sum` and `_count`, label-value escaping (`\`, `"`, newline), valid metric
+  and label names, and deterministic ordering.
+- Counters map to counters; a sum becomes a monotonic value plus separate
+  observation and unknown counters; histograms become cumulative buckets
+  (the aggregator stores non-cumulative counts).
+- Rates and percentiles are **not** exported; consumers derive them from the
+  counters. A start-time metric supports reset detection.
+- Duration metrics keep their `_ms` names and values. This intentionally
+  deviates from the seconds convention; any seconds representation would be an
+  explicit mapping decision, never an accidental unit change.
+
+**M8.4: `rate_limit.blocked` event [design-locked].** The middleware emits a
+bounded event for requests rejected before the router.
+- Labelled by `route` only: `/query`, `/rag`, `/analytics`, anything else
+  `other`. No raw path is ever a label. It has no `request_id`.
+- Requires classifying the event in the M7.2 policy and updating the runtime
+  completeness test.
+- Afterwards, "instrumented application request volume" is approximately
+  `request.completed` plus `rate_limit.blocked`; it is still not every
+  possible HTTP request to the server.
 
 ---
 

@@ -17,6 +17,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routers import router
+from src.observability.live import configure_from_env as configure_live_signals
 from src.safety.rate_limit import RateLimitMiddleware
 
 
@@ -37,6 +38,8 @@ def create_app() -> FastAPI:
 
     configure_middleware(app)
     register_routes(app)
+    # Opt-in (SIGNALS_ENABLED); a no-op by default. No endpoint yet (M8.2).
+    configure_live_signals()
 
     return app
 
