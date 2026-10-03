@@ -214,6 +214,11 @@ Under UU PDP's data-minimization principle (exact articles to be confirmed
 with legal/compliance), telemetry that is not needed to answer "what
 happened?" must not exist.
 
+**Scope.** These rules govern the **telemetry surfaces**: structured events,
+`/signals` and `/metrics`. They do not govern the application's ordinary
+free-text logs or the web server's access log; see "Boundary of this contract:
+application logs" at the end of this section.
+
 - Never put raw query text in a structured event. Use `query_hash` (sha256,
   first 12 hex chars) and `query_length`.
 - Never put document or chunk content in an event. Only counts and
@@ -224,11 +229,40 @@ happened?" must not exist.
   (`sql`), but is excluded from telemetry.** The response field grounds the
   answer; events carry only `intent`, `used_fallback_sql`, `row_count` and
   error types.
-- Client IP is held in memory by the rate limiter only. It is never emitted
-  in an event and, as of M8.4, never written to a log line: the former
-  `Blocked ip=...` warning now logs only the bounded route and the window
-  count. `rate_limit.blocked` carries the route and nothing that identifies a
-  client.
+- The rate limiter holds the client address in memory only (to key its
+  window). Its own implementation does not write the client IP, or any client
+  identifier, to an event or to its own log line: `rate_limit.blocked`
+  carries the route and nothing that identifies a client, and, as of M8.4, the
+  former `Blocked ip=...` warning logs only the bounded route and the window
+  count. This claim covers that code only. It says nothing about other log
+  sources, such as the web server's access log (below).
+
+### Boundary of this contract: application logs
+
+Known gaps, recorded as findings, **not** fixed by M7 or M8. M8 telemetry is
+privacy-bounded; the wider application logging surface is not covered by these
+guarantees.
+
+- **Raw query text appears in application INFO logs.** Existing log sites in
+  `src.orchestrator`, `src.analytics.fraud_analytics` and
+  `src.rag.retriever_direct` write the user's query text at INFO (for example
+  `[retriever_direct] query='...'`). This was observed in the container log of
+  the pinned image while exercising `/query` and `/rag`. Events, `/signals`
+  and `/metrics` do not contain query text (they carry `query_length` and
+  `query_hash` only), but the logs do. Treat INFO logs as potentially holding
+  user-provided content: restrict who can read them and how long they are
+  kept, and do not export them to systems that the telemetry rules were meant
+  to protect.
+- **The web server's access log includes the TCP peer address.** uvicorn
+  writes one access-log line per request containing the address of the
+  connection's peer (in the containerised run this was the Docker gateway), not
+  the `X-Forwarded-For` client the rate limiter keys on. This contract does not
+  govern uvicorn's logs. Which address Render's proxy presents to the service,
+  and what Render itself logs, has **not been verified** here, and this contract
+  makes no claim about it.
+- **Remediation is a separate change.** Removing or redacting the query text
+  at the three log sites, or changing access logging, alters production
+  behaviour and needs its own design; neither is part of the M7/M8 freeze.
 
 ---
 
@@ -921,8 +955,10 @@ router runs.
 - **Telemetry never changes the decision.** Recording a block has its own
   guard; if logging or emission fails the request is still answered 429 (the
   existing outer fail-open still applies to genuine limiter failures).
-- **Privacy:** the raw client IP is no longer written to the rate-limit
-  warning (it logs route and window count only), consistent with §6.
+- **Privacy:** the rate limiter no longer writes the raw client IP to its own
+  warning (it logs route and window count only) and the event carries no client
+  identifier, consistent with §6. Other log sources, such as uvicorn's access
+  log, are outside this contract (§6).
 - Classified in the M7.2 policy (`route` and `status` as dimensions; the route
   domain is the three routes plus `other`). Signals: `rate_limited_total{route}`
   and `request_rate_limited_ratio` (§13); exposition: `rate_limited_total`
@@ -981,8 +1017,11 @@ address.
   in a local benchmark; not a guarantee on other hardware).
 - Guardrails can make an LLM call before rejecting a query (§11).
 
-**Privacy.** Events and signals carry bounded dimensions only; the client IP is
-never emitted or logged by the rate limiter (§6).
+**Privacy.** Events and signals carry bounded dimensions only, and the rate
+limiter does not emit or log the client IP (§6). Application logs are outside
+that guarantee: INFO logs currently contain raw query text, and uvicorn's
+access log contains the connection peer's address (§6, "Boundary of this
+contract").
 
 ---
 
