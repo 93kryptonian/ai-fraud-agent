@@ -42,7 +42,7 @@ jobs:
       # --------------------------------------------------
       - name: Lint (ruff)
         run: |
-          pip install ruff
+          pip install "ruff==0.14.10"
           ruff check src api tests
 
       # --------------------------------------------------
