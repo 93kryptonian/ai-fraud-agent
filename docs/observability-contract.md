@@ -4,7 +4,7 @@ Status: **reconciled after M6, updated for M7.1.** M6 is implemented and
 frozen at `513f4b4`. Sections marked **[implemented]** describe what the code
 emits today (M7.1 request-level cost is implemented, §8). Sections marked
 **[design-only]** describe M7 design direction; nothing in them is
-implemented yet. (M7.2 dimension policy, §9, M7.3 operational signals, §13, the M8.1 live feed and the M8.2 `/signals` endpoint, §14, are implemented.)
+implemented yet. (M7.2 dimension policy, §9, M7.3 operational signals, §13, the M8.1 live feed, the M8.2 `/signals` endpoint and the M8.3 `/metrics` exposition, §14, are implemented.)
 
 This document began as the M2 contract. It has been reconciled against the
 actual code: events the M2 text promised but the code never emitted were
@@ -648,7 +648,7 @@ calls), `llm_fallback_rate` (fallbacks / LLM calls), `retrieval_empty_rate`
 
 ---
 
-## 14. Exposure design (M8) [M8.1 and M8.2 implemented; M8.3-M8.4 design-locked, not implemented]
+## 14. Exposure design (M8) [M8.1-M8.3 implemented; M8.4 design-locked, not implemented]
 
 M8 exposes the M7.3 signals without coupling to a vendor. Target: **pull-based,
 in-process** signals; JSONL replay (§13 CLI) remains the offline path. Push to
@@ -717,20 +717,95 @@ debugging conveniences).
   `meta.ignored_records`, `meta.events_observed` and `meta.in_flight_requests`
   are plain numbers, never labels or dimensions.
 
-**M8.3: Prometheus text exposition [design-locked].** A separate mapping from
-the analytical snapshot; the exposition format is not the internal model.
-- Hand-rendered; no `prometheus_client`, no global registry.
-- Must emit `# HELP` / `# TYPE`, cumulative histogram buckets with `+Inf`,
-  `_sum` and `_count`, label-value escaping (`\`, `"`, newline), valid metric
-  and label names, and deterministic ordering.
-- Counters map to counters; a sum becomes a monotonic value plus separate
-  observation and unknown counters; histograms become cumulative buckets
-  (the aggregator stores non-cumulative counts).
-- Rates and percentiles are **not** exported; consumers derive them from the
-  counters. A start-time metric supports reset detection.
-- Duration metrics keep their `_ms` names and values. This intentionally
-  deviates from the seconds convention; any seconds representation would be an
-  explicit mapping decision, never an accidental unit change.
+**M8.3: Prometheus text exposition [implemented]**
+(`src/observability/exposition.py`, `GET /metrics` in `api/signals.py`).
+M7.3 owns the analytical snapshot; M8.3 owns only a representation of it. The
+exporter is a pure function (`render_prometheus(snapshot) -> str`): no I/O, no
+environment, no threads, no `prometheus_client`, no global registry, and it
+never touches the aggregator.
+- **Endpoint:** `GET /metrics` is separate from `/signals` (which stays the
+  JSON snapshot). It has the identical gate and access rules: registered only
+  when the feed is enabled and `SIGNALS_TOKEN` is set (else 404 and absent
+  from OpenAPI), bearer auth with 401, constant-time comparison, generic 503,
+  `Cache-Control: no-store`, no token leakage, self-exclusion (scraping never
+  contributes to the signals), and the existing rate limiter and CORS.
+  `Content-Type: text/plain; version=0.0.4; charset=utf-8`.
+- **Lock boundary:** the endpoint takes one snapshot (the aggregator lock is
+  held only inside `snapshot()`) and renders the text **outside** that lock;
+  sorting, cumulative conversion and string building never run inside the
+  collection critical section.
+- **Format:** Prometheus text 0.0.4 only; no OpenMetrics, no content
+  negotiation. Every family has `# HELP` and `# TYPE`; names and label names
+  are validated; label values escape `\`, `"` and newline; `le` is reserved
+  (no policy dimension may be named `le`); output is deterministic (families
+  sorted by name, series sorted, label names sorted, `le` last).
+- **Mapping:**
+
+| Snapshot | Exposition |
+|---|---|
+| counter `x_total` | `counter` |
+| sum `foo_total` `{sum,count,null_count}` | `foo_total` (the sum), `foo_observations_total` (non-null count), `foo_unknown_total` (null count), all `counter` |
+| histogram `x` | `histogram`: **cumulative** `x_bucket{...,le="..."}` including `+Inf`, then `x_sum`, `x_count` (the aggregator stores non-cumulative counts; conversion is the exporter's job) |
+| `llm_calls_per_request` | histogram labelled by `purpose` |
+| `signals_unclassified_total`, `signals_dropped_requests_total` | `counter` |
+| `meta.events_observed`, `handler_errors`, `ignored_records` | `signals_events_observed_total`, `signals_handler_errors_total`, `signals_ignored_records_total` (`counter`) |
+| `meta.in_flight_requests`, `started_at_unix` | `signals_in_flight_requests`, `signals_start_time_seconds` (`gauge`) |
+| `rates`, `p50`/`p95`/`p99` | **not exported**: consumers derive them (`rate()`, `histogram_quantile()`) |
+
+- Histogram bounds render as stored (`1`, `5`, ..., `10000`, `+Inf`).
+- The sum expansion is generic: `llm_cost_usd_unknown_total` and the separate
+  M7.3 counter `llm_cost_unknown_total` carry overlapping data under different
+  names. That overlap is accepted rather than special-cased; a test asserts no
+  two exposition families share a name.
+- **Absence is not zero:** a family with no observed series is omitted
+  entirely; nothing is initialized merely because it exists in the inventory.
+  Only the meta families (known process-local semantics, zero included) are
+  always present; `signals_handler_errors_total`,
+  `signals_ignored_records_total` and `signals_start_time_seconds` come from
+  the live collector and are absent from a plain replay snapshot.
+- Duration metrics keep `_ms` names and values: an intentional deviation from
+  the seconds convention (`signals_start_time_seconds` is a Unix timestamp). A
+  seconds view would be an explicit mapping decision, never a silent unit
+  change.
+- Every metric in the inventory must have a static one-line `HELP` text; a
+  test fails if one is added without it. The invariant that proves the
+  boundary is round-trip conservation: runtime events -> M7.3 snapshot ->
+  Prometheus text -> parsed text equals the snapshot's totals.
+- **Reset semantics:** counters are process-local and start at zero after a
+  restart or spin-down; `signals_start_time_seconds` changes when that
+  happens, and a scraper's counter-reset handling (`rate()` / `increase()`)
+  covers the rest.
+
+Example configuration only (not a requirement imposed by the application; the
+limiter allows 20 requests/minute per client by default, so a 30 s interval
+leaves ample headroom):
+
+```yaml
+scrape_configs:
+  - job_name: ai-fraud-agent
+    scheme: https
+    metrics_path: /metrics
+    scrape_interval: 30s
+    authorization:
+      type: Bearer
+      credentials: <SIGNALS_TOKEN>
+    static_configs:
+      - targets: ["<service-host>"]
+```
+
+Example queries only (derived by the consumer, not shipped as rules):
+
+```text
+# request error ratio over 5 minutes
+sum(rate(requests_total{status="error"}[5m])) / sum(rate(requests_total[5m]))
+
+# p95 request latency in ms
+histogram_quantile(0.95, sum by (le) (rate(request_duration_ms_bucket[5m])))
+
+# LLM calls one request makes for language detection (mean)
+sum(rate(llm_calls_per_request_sum{purpose="language_detection"}[5m]))
+  / sum(rate(llm_calls_per_request_count{purpose="language_detection"}[5m]))
+```
 
 **M8.4: `rate_limit.blocked` event [design-locked].** The middleware emits a
 bounded event for requests rejected before the router.

@@ -17,7 +17,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routers import router
-from api.signals import register_signals_route
+from api.signals import register_signals_routes
 from src.observability.live import configure_from_env as configure_live_signals
 from src.safety.rate_limit import RateLimitMiddleware
 
@@ -40,9 +40,9 @@ def create_app() -> FastAPI:
     configure_middleware(app)
     register_routes(app)
     # Opt-in (SIGNALS_ENABLED); a no-op by default. The /signals endpoint is
-    # registered only when the feed is enabled AND SIGNALS_TOKEN is set.
+    # registered (with /metrics) only when the feed is enabled AND SIGNALS_TOKEN is set.
     if configure_live_signals() is not None:
-        register_signals_route(app)
+        register_signals_routes(app)
 
     return app
 
