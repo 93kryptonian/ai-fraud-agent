@@ -4,7 +4,7 @@ Status: **reconciled after M6, updated for M7.1.** M6 is implemented and
 frozen at `513f4b4`. Sections marked **[implemented]** describe what the code
 emits today (M7.1 request-level cost is implemented, §8). Sections marked
 **[design-only]** describe M7 design direction; nothing in them is
-implemented yet.
+implemented yet. (M7.2 dimension policy, §9, is implemented.)
 
 This document began as the M2 contract. It has been reconciled against the
 actual code: events the M2 text promised but the code never emitted were
@@ -298,36 +298,167 @@ Rules:
 
 ---
 
-## 9. M7 metric cardinality policy [design-only, not yet implemented]
+## 9. Metric dimension policy [implemented in M7.2]
 
-Metrics are derived from events; they do not replace them. Every metric
-dimension must be bounded and non-sensitive.
+Events answer "what happened during this request?"; metrics answer "what
+pattern exists across requests?". Metrics are derived from events; they do
+not replace them, and event metadata is **not** a bag of metric labels.
 
-Allowed dimensions (bounded):
+The executable policy is `src/observability/dimensions.py`; the table below is
+generated from it and a test fails if the two drift. To regenerate:
+`python -m src.observability.dimensions`.
 
-```text
-route, status, intent, lang
-llm: purpose, model, outcome
-fallback: reason
-retrieval: retrieval_method, outcome
-ranking: reranker, outcome
-analytics: intent (timeseries|merchant_rank|category_rank|generic),
-           used_fallback_sql, outcome
-```
+Every key observed in an emitted event has exactly one classification **for
+that event type** (the same key name can carry different domains in different
+events, e.g. `guardrails.reason`, `retrieval.reason`, `llm.fallback.reason`):
 
-Prohibited as metric dimensions (high-cardinality or sensitive; fine as
-event-level correlation fields where they already exist, never as labels):
+- **dimension**: bounded, label-safe; the value must come from a closed set.
+- **measure**: numeric; aggregated (count / sum / histogram), never a label.
+- **correlation**: event-level only (`request_id`, `query_hash`, `timestamp`).
+- **identity**: names the series (`event`, `step`, `schema_version`).
+- **excluded**: must not reach metrics at all (`source_filter`).
 
-```text
-request_id, query_hash, raw query, SQL, error text, prompt/completion,
-document content or IDs, source names, client identifiers, timestamps
-```
+Rules:
+- **Unknown values become `other`.** A value outside a dimension's domain is
+  bucketed to the literal `other`; it is never passed through or dropped.
+- **`error_type` and `primary_error_type`** are dimension-safe only after
+  allowlist normalization (known exception class, else `other`; `none` when
+  absent). Raw exception class names must never be emitted as metric label
+  values. A metric uses at most one error-class dimension per event.
+- **`model`, `from_model`, `to_model`** are bounded to priced or configured
+  models, else `other`.
+- **Forbidden keys** (raw query, SQL, prompts/completions, error text,
+  document content or IDs, source names, client identifiers) are rejected
+  outright and can never be classified as anything.
+- **Not dimensions today:** `lang` (emitted by no event) and request-level
+  `intent` (not emitted on `request.completed`). Request latency is sliced by
+  `route` only. Adding either field is an event-schema change, out of scope
+  for M7.2.
+- The policy defines **no metric names** and is not wired into `emit_event()`.
+  Metric selection, aggregation and export are M7.3 / M8.
+- Series upper bounds below are theoretical (every dimension of the event
+  used together, error domain counted once); a metric need not use them all.
+  Each must stay at or under the cap.
 
-Operational questions M7 must be able to answer: request error and block
-rate and latency; LLM failure, retry and fallback rate, tokens and cost;
-retrieval success, skip, failure and empty-result rate; ranking failure
-rate; analytics SQL fallback and failure rate; and how many LLM calls each
-`purpose` makes per request.
+<!-- dimensions:start -->
+| Event | Key | Class | Allowed values |
+|---|---|---|---|
+| `analytics.completed` | `chart_generated` | dimension | `false`, `true`; else `other` |
+| `analytics.completed` | `confidence` | measure |  |
+| `analytics.completed` | `error_type` | dimension | known exception classes, else `other` |
+| `analytics.completed` | `intent` | dimension | `category_rank`, `generic`, `merchant_rank`, `none`, `timeseries`; else `other` |
+| `analytics.completed` | `status` | dimension | `failure`, `success`; else `other` |
+| `analytics.sql.completed` | `intent` | dimension | `category_rank`, `generic`, `merchant_rank`, `none`, `timeseries`; else `other` |
+| `analytics.sql.completed` | `primary_error_type` | dimension | known exception classes, else `other` |
+| `analytics.sql.completed` | `row_count` | measure |  |
+| `analytics.sql.completed` | `status` | dimension | `success`; else `other` |
+| `analytics.sql.completed` | `used_fallback_sql` | dimension | `false`, `true`; else `other` |
+| `analytics.sql.failed` | `error_type` | dimension | known exception classes, else `other` |
+| `analytics.sql.failed` | `intent` | dimension | `category_rank`, `generic`, `merchant_rank`, `none`, `timeseries`; else `other` |
+| `analytics.sql.failed` | `primary_error_type` | dimension | known exception classes, else `other` |
+| `analytics.sql.failed` | `status` | dimension | `failure`; else `other` |
+| `analytics.sql.failed` | `used_fallback_sql` | dimension | `false`, `true`; else `other` |
+| `guardrails.blocked` | `blocked` | dimension | `false`, `true`; else `other` |
+| `guardrails.blocked` | `query_hash` | correlation |  |
+| `guardrails.blocked` | `query_length` | measure |  |
+| `guardrails.blocked` | `reason` | dimension | `injection`, `noise`, `none`, `out_of_domain`, `too_short`; else `other` |
+| `guardrails.blocked` | `status` | dimension | `blocked`; else `other` |
+| `guardrails.completed` | `blocked` | dimension | `false`, `true`; else `other` |
+| `guardrails.completed` | `query_hash` | correlation |  |
+| `guardrails.completed` | `query_length` | measure |  |
+| `guardrails.completed` | `reason` | dimension | `injection`, `noise`, `none`, `out_of_domain`, `too_short`; else `other` |
+| `guardrails.completed` | `status` | dimension | `success`; else `other` |
+| `intent.completed` | `confidence` | measure |  |
+| `intent.completed` | `intent` | dimension | `analytics`, `rag`, `reject`; else `other` |
+| `intent.completed` | `method` | dimension | `heuristic`, `llm`; else `other` |
+| `intent.completed` | `route` | dimension | `analytics`, `rag`, `reject`; else `other` |
+| `intent.completed` | `status` | dimension | `success`; else `other` |
+| `intent.failed` | `error_type` | dimension | known exception classes, else `other` |
+| `intent.failed` | `status` | dimension | `failure`; else `other` |
+| `language_detection.completed` | `status` | dimension | `success`; else `other` |
+| `language_detection.failed` | `status` | dimension | `failure`; else `other` |
+| `llm.completed` | `completion_tokens` | measure |  |
+| `llm.completed` | `estimated_cost_usd` | measure |  |
+| `llm.completed` | `model` | dimension | priced or configured models, else `other` |
+| `llm.completed` | `prompt_tokens` | measure |  |
+| `llm.completed` | `purpose` | dimension | `analytics_nl_to_sql`, `analytics_summary`, `intent_classification`, `language_detection`, `llm_rerank`, `query_rewrite`, `rag_answer`, `rag_insight`, `translation`; else `other` |
+| `llm.completed` | `retry_count` | measure |  |
+| `llm.completed` | `status` | dimension | `success`; else `other` |
+| `llm.completed` | `total_tokens` | measure |  |
+| `llm.failed` | `error_type` | dimension | known exception classes, else `other` |
+| `llm.failed` | `model` | dimension | priced or configured models, else `other` |
+| `llm.failed` | `purpose` | dimension | `analytics_nl_to_sql`, `analytics_summary`, `intent_classification`, `language_detection`, `llm_rerank`, `query_rewrite`, `rag_answer`, `rag_insight`, `translation`; else `other` |
+| `llm.failed` | `retry_count` | measure |  |
+| `llm.failed` | `status` | dimension | `failure`; else `other` |
+| `llm.fallback` | `cumulative_session_cost_usd` | measure |  |
+| `llm.fallback` | `from_model` | dimension | priced or configured models, else `other` |
+| `llm.fallback` | `purpose` | dimension | `analytics_nl_to_sql`, `analytics_summary`, `intent_classification`, `language_detection`, `llm_rerank`, `query_rewrite`, `rag_answer`, `rag_insight`, `translation`; else `other` |
+| `llm.fallback` | `reason` | dimension | `budget_threshold`; else `other` |
+| `llm.fallback` | `status` | dimension | `success`; else `other` |
+| `llm.fallback` | `to_model` | dimension | priced or configured models, else `other` |
+| `ranking.completed` | `candidate_count` | measure |  |
+| `ranking.completed` | `reranker` | dimension | `hybrid`; else `other` |
+| `ranking.completed` | `selected_count` | measure |  |
+| `ranking.completed` | `status` | dimension | `success`; else `other` |
+| `ranking.failed` | `candidate_count` | measure |  |
+| `ranking.failed` | `error_type` | dimension | known exception classes, else `other` |
+| `ranking.failed` | `status` | dimension | `failure`; else `other` |
+| `ranking.skipped` | `candidate_count` | measure |  |
+| `ranking.skipped` | `selected_count` | measure |  |
+| `ranking.skipped` | `status` | dimension | `skipped`; else `other` |
+| `request.completed` | `cost_status` | dimension | `complete`, `not_applicable`, `partial`, `unknown`; else `other` |
+| `request.completed` | `cost_usd_total` | measure |  |
+| `request.completed` | `error_type` | dimension | known exception classes, else `other` |
+| `request.completed` | `route` | dimension | `/analytics`, `/query`, `/rag`; else `other` |
+| `request.completed` | `status` | dimension | `blocked`, `error`, `success`; else `other` |
+| `request.started` | `route` | dimension | `/analytics`, `/query`, `/rag`; else `other` |
+| `request.started` | `status` | dimension | `success`; else `other` |
+| `retrieval.completed` | `candidate_count` | measure |  |
+| `retrieval.completed` | `retrieval_method` | dimension | `vector_rpc`; else `other` |
+| `retrieval.completed` | `source_filter` | excluded |  |
+| `retrieval.completed` | `status` | dimension | `success`; else `other` |
+| `retrieval.failed` | `error_type` | dimension | known exception classes, else `other` |
+| `retrieval.failed` | `retrieval_method` | dimension | `vector_rpc`; else `other` |
+| `retrieval.failed` | `source_filter` | excluded |  |
+| `retrieval.failed` | `status` | dimension | `failure`; else `other` |
+| `retrieval.skipped` | `candidate_count` | measure |  |
+| `retrieval.skipped` | `reason` | dimension | `no_embedding`, `retriever_disabled`; else `other` |
+| `retrieval.skipped` | `retrieval_method` | dimension | `vector_rpc`; else `other` |
+| `retrieval.skipped` | `selected_count` | measure |  |
+| `retrieval.skipped` | `source_filter` | excluded |  |
+| `retrieval.skipped` | `status` | dimension | `skipped`; else `other` |
+
+| Event | Series upper bound |
+|---|---|
+| `analytics.completed` | 864 |
+| `analytics.sql.completed` | 576 |
+| `analytics.sql.failed` | 576 |
+| `guardrails.blocked` | 36 |
+| `guardrails.completed` | 36 |
+| `intent.completed` | 96 |
+| `intent.failed` | 32 |
+| `language_detection.completed` | 2 |
+| `language_detection.failed` | 2 |
+| `llm.completed` | 100 |
+| `llm.failed` | 1600 |
+| `llm.fallback` | 1000 |
+| `ranking.completed` | 4 |
+| `ranking.failed` | 32 |
+| `ranking.skipped` | 2 |
+| `request.completed` | 1280 |
+| `request.started` | 8 |
+| `retrieval.completed` | 4 |
+| `retrieval.failed` | 64 |
+| `retrieval.skipped` | 12 |
+
+Cardinality cap per event: 2000.
+<!-- dimensions:end -->
+
+Operational questions the policy must support: request error and block rate
+and latency by `route`; LLM failure, retry and fallback rate, tokens and cost
+by `purpose` and `model`; retrieval success, skip and failure rate;
+ranking failure rate; analytics SQL fallback and failure rate; and how many
+LLM calls each `purpose` makes per request.
 
 Derived, not re-emitted: latency percentiles come from
 `request.completed.duration_ms`; rates come from terminal event counts.
