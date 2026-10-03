@@ -1,9 +1,10 @@
 # Observability Contract (reconciled after M6)
 
-Status: **reconciled after M6.** M6 is implemented and frozen at `513f4b4`.
-Sections marked **[implemented]** describe what the code emits today.
-Sections marked **[design-only]** describe M7 design direction; nothing in
-them is implemented yet.
+Status: **reconciled after M6, updated for M7.1.** M6 is implemented and
+frozen at `513f4b4`. Sections marked **[implemented]** describe what the code
+emits today (M7.1 request-level cost is implemented, §8). Sections marked
+**[design-only]** describe M7 design direction; nothing in them is
+implemented yet.
 
 This document began as the M2 contract. It has been reconciled against the
 actual code: events the M2 text promised but the code never emitted were
@@ -82,7 +83,7 @@ router runs. They get no `request_id` and emit no events today (see §4).
 
 ---
 
-## 2. Request-level record [implemented, narrower than M2 intended]
+## 2. Request-level record [implemented, narrower than M2 intended; cost added in M7.1]
 
 One `request.completed` event per request, emitted by the router handler
 (exactly one, including on an unhandled exception).
@@ -94,11 +95,13 @@ One `request.completed` event per request, emitted by the router handler
 | `duration_ms` | envelope | Real handler duration, integer ms. |
 | `metadata.route` | metadata | `/query`, `/rag`, `/analytics`. |
 | `metadata.error_type` | metadata | Present only when `status == "error"`. Exception class name only. |
+| `metadata.cost_status` | metadata | M7.1. `not_applicable \| complete \| partial \| unknown`, on every `request.completed` (success, blocked and error). See §8. |
+| `metadata.cost_usd_total` | metadata | M7.1. `float` (rounded to 6 decimals), or `null` when `cost_status == "unknown"`. See §8. |
 
 Fields the M2 contract listed for this record that are **not emitted today**:
 `intent`, `lang`, `started_at`/`completed_at`, `error` (message),
-`cost_usd_total`, `fallback_used`, `fallback_reason`. The `intent` is
-available from `intent.completed`. Request-level cost is M7 (§8).
+`fallback_used`, `fallback_reason`. The `intent` is available from
+`intent.completed`. (Request-level cost was in this list until M7.1.)
 
 ---
 
@@ -155,7 +158,7 @@ Only events the code actually emits are listed.
 | `analytics.sql.completed` | `src/analytics/fraud_analytics.py` | `intent`, `used_fallback_sql`, `primary_error_type`, `row_count` |
 | `analytics.sql.failed` | same | `intent`, `used_fallback_sql`, `primary_error_type`, `error_type` |
 | `analytics.completed` | same | success: `intent`, `confidence`, `chart_generated`. failure: `error_type`. An honest "insufficient data" answer is `success`; only an unexpected internal failure is `failure`. |
-| `request.completed` | `api/routers.py` | see §2 |
+| `request.completed` | `api/routers.py` | `route`, `cost_status`, `cost_usd_total`; plus `error_type` on error (§2) |
 
 `llm.purpose` values emitted by code: `intent_classification`,
 `language_detection`, `translation`, `query_rewrite`, `rag_answer`,
@@ -187,7 +190,7 @@ Fixed:
    `LLMExhaustedRetriesError` and emit `llm.failed`; no sentinel string.
 2. **Per-request cost accumulation** — fixed as a prerequisite. A
    request-scoped accumulator (`src/observability/cost.py`) sums per-call
-   estimated cost. It is **not yet exposed** in any event (§8).
+   estimated cost. Exposed on `request.completed` as of M7.1 (§8).
 3. **`details=str(e)` information leak** — fixed after M6 (§10).
 
 Still open:
@@ -237,41 +240,61 @@ happened?" must not exist.
 
 ---
 
-## 8. M7 cost contract [design-only, not yet implemented]
+## 8. Request-level cost contract [implemented in M7.1]
 
-Request-level cost is not emitted today. M7.1 will add it to
-`request.completed`.
+`request.completed` carries `cost_status` and `cost_usd_total` on every
+outcome (success, blocked, error) of every route. A blocked request can
+carry cost: guardrails may call the LLM for language detection before it
+blocks.
+
+Cost is derived from **responses received**, never from attempts:
+
+| Observation | Effect |
+|---|---|
+| Response with usage, model priced | known cost added (priced response) |
+| Response with usage, model has no price | unpriced response |
+| Response without usage | unpriced response |
+| Attempt raised before any response | nothing: no cost, no unknown count |
+| Retry then success | every response with usage counts |
+| Fallback model | both models' costs sum into the request |
 
 ```text
 cost_status:
-  not_applicable   no LLM call occurred in the request
-  complete         every LLM call has attributable cost
-  partial          at least one call's cost is unknown, others known
-  unknown          an LLM call occurred and no cost is attributable
-
-cost_usd_total:
-  0.0              when not_applicable
-  known total      when complete
-  known partial    when partial (a lower bound)
-  null             when unknown
+  not_applicable   no response was received (including: every call failed
+                   before a response) -> cost_usd_total = 0.0
+  complete         every response received was priced -> known total
+  partial          >=1 priced and >=1 unpriced response -> known lower bound
+  unknown          only unpriced responses -> null
 ```
 
+`complete` means every LLM response received by the request had an
+attributable, known price. Calls that fail before a response containing
+usage is received do not affect cost completeness; their reliability is
+reported by `llm.failed`, not by cost. A request whose only LLM calls all
+failed is therefore `not_applicable`, not `complete`.
+
 Rules:
-- **Unknown is never `$0.00`.** Missing provider usage and an unpriced model
-  are both "unknown". Today `estimate_cost()` returns `0.0` for an unknown
-  model; M7.1 must change that.
-- Input and output tokens are priced distinctly in M7.1. Today a single
-  per-1K price is applied to the sum of both.
-- Fallback-model calls count toward request cost (both models' costs are
-  summed).
-- A request that errors or hits the low-confidence fallback still reports
-  the cost of the LLM calls that already completed.
-- Attribution for failed or retried calls (billable attempts that produced
-  no usable response) needs explicit semantics in M7.1; until then a call
-  that exhausted retries adds no cost.
+- **Unknown is never `$0.00`.** `estimate_cost()` returns `None` for a model
+  with no price, and `llm.completed.estimated_cost_usd` is `null` in that
+  case (and when the provider returns no usage). The per-call event carries
+  no `cost_status`; completeness is a request-level aggregation.
+- Input and output tokens are priced separately
+  (`PRICES_PER_1M = (input, output)` per model). Model matching is **exact**
+  on the requested name: an alias such as `gpt-4o-mini` does not imply its
+  dated snapshots, which may be priced differently.
+- Usage is recorded the moment a response arrives, before any parsing, so a
+  billable response whose parsing then fails (and is retried) still counts.
+- Cached-input discounts are not modelled; the estimate is an upper bound
+  for cached prompts.
 - Request attribution is **separate** from the process-global budget guard.
-  `SESSION_COST_USD >= MAX_COST_USD` (downgrade policy across many
-  requests) must not be merged with per-request cost.
+  The guard (`SESSION_COST_USD >= MAX_COST_USD`) is a **known-cost guard,
+  not a total-spend guard**: unpriced usage cannot contribute to its
+  threshold. A one-time warning is logged per unpriced model, since the
+  guard's accounting coverage is degraded while it is in use.
+- `DEFAULT_MODEL` and `FALLBACK_MODEL` default to the same model, so the
+  budget downgrade (`llm.fallback`) is not reachable under default
+  configuration. This is a configuration fact, not a defect.
+- `schema_version` stays `1`: the cost fields are additive optional metadata.
 
 ---
 
