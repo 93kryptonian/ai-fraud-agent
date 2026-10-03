@@ -390,6 +390,49 @@ def test_series_upper_bound_within_cap(event):
     assert dim.series_upper_bound(event) <= dim.CARDINALITY_CAP
 
 
+def test_constant_dimensions_get_no_fictitious_other_bucket():
+    # status is fixed by the event name: one possible value -> factor 1, not 2
+    assert dim.series_upper_bound("language_detection.completed") == 1
+    assert dim.series_upper_bound("ranking.skipped") == 1
+    assert dim.series_upper_bound("retrieval.completed") == 1      # status + single retrieval_method
+    # route has 3 routes + "other" (already in its domain); status is constant
+    assert dim.series_upper_bound("rate_limit.blocked") == 4
+
+
+def test_multi_valued_dimensions_still_add_the_other_bucket():
+    # analytics.completed: status{success,failure}+other=3 x intent(4 + none)+other=6
+    #                      x chart_generated{true,false}+other=3 x errors(14 + none)+other=16
+    assert dim.series_upper_bound("analytics.completed") == 3 * 6 * 3 * 16 == 864
+    # request.completed: route 3+1=4 x status{success,blocked,error}+1=4 x cost_status 4+1=5 x errors 16
+    assert dim.series_upper_bound("request.completed") == 4 * 4 * 5 * 16 == 1280
+
+
+def test_llm_failed_bound_is_the_real_one_not_double():
+    # status is constant (1); purpose 9+1=10; model = 2 priced + 2 configured + other = 5; errors 14+none+other
+    expected = 1 * 10 * 5 * (len(dim.ERROR_TYPES) + 2)
+    assert dim.series_upper_bound("llm.failed") == expected
+    assert dim.series_upper_bound("llm.failed") < 1600          # was inflated 2x before the correction
+
+
+def test_bound_rule_on_a_synthetic_policy(monkeypatch):
+    R = dim.Rule
+    monkeypatch.setitem(dim.POLICY, ("synthetic.event", "status"), R(dim.DIMENSION, frozenset({"success"})))
+    monkeypatch.setitem(dim.POLICY, ("synthetic.event", "kind"), R(dim.DIMENSION, frozenset({"a", "b"})))
+    monkeypatch.setitem(dim.POLICY, ("synthetic.event", "error_type"), R(dim.DIMENSION, "error_types"))
+    monkeypatch.setitem(dim.POLICY, ("synthetic.event", "primary_error_type"), R(dim.DIMENSION, "error_types"))
+    monkeypatch.setitem(dim.POLICY, ("synthetic.event", "bytes"), R(dim.MEASURE))
+
+    # constant status: 1; kind {a,b}+other: 3; error domain counted ONCE (not squared); measure ignored
+    assert dim.series_upper_bound("synthetic.event") == 1 * 3 * (len(dim.ERROR_TYPES) + 2)
+
+
+def test_other_mapping_is_unchanged_for_constant_dimensions():
+    # the bound no longer counts "other" for a constant dimension, but the
+    # label mapping still buckets an unexpected value rather than passing it through
+    assert dim.dimension_value("llm.failed", "status", "success") == dim.OTHER
+    assert dim.dimension_value("llm.failed", "status", "failure") == "failure"
+
+
 # =============================================================================
 # 5. Contract <-> implementation sync
 # =============================================================================
