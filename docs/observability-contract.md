@@ -1,15 +1,30 @@
-# Observability Contract (M2)
+# Observability Contract (reconciled after M6)
 
-Status: **contract only — nothing in this document is implemented yet.**
-No code changes accompany this file. See "Relationship to `docs/observability.md`"
-at the end for how this replaces that document once M3–M9 land.
+Status: **reconciled after M6.** M6 is implemented and frozen at `513f4b4`.
+Sections marked **[implemented]** describe what the code emits today.
+Sections marked **[design-only]** describe M7 design direction; nothing in
+them is implemented yet.
 
-This is Milestone 2 of the observability upgrade (M1 baseline freeze → **M2
-this contract** → M3 request context → M4 structured events → M5 timing +
-orchestrator instrumentation → M6 RAG/LLM/fallback instrumentation → M7 tests
-→ M8 trace viewer + metrics → M9 docs).
+This document began as the M2 contract. It has been reconciled against the
+actual code: events the M2 text promised but the code never emitted were
+removed, event names that differ from the implementation were corrected, and
+post-M6 changes are recorded in §10. It does not rewrite history; where the
+original intent differs from the implementation, §11 says so.
 
-The target capability, stated once, precisely:
+Milestone sequence:
+
+```text
+M1 baseline freeze
+→ M2 observability contract
+→ M3 request context
+→ M4 structured events
+→ M5 timing/lifecycle
+→ M6 pipeline instrumentation
+→ M7 operational signals
+→ M8 exposure/export
+```
+
+The target capability, unchanged since M2:
 
 > Given a `request_id`, reconstruct the full execution path of that request —
 > every stage it passed through, in order, with latency, status, and enough
@@ -18,11 +33,9 @@ The target capability, stated once, precisely:
 
 ---
 
-## 1. Scope: the real request lifecycle
+## 1. Scope: the real request lifecycle [implemented]
 
-This contract is written against the code as it actually exists, not an
-idealized pipeline. There are **three entry points**, and they do not all go
-through the same stages:
+Three entry points; they do not share the same stages:
 
 ```
 POST /query      → validate_query() → run_query()      [orchestrator: full pipeline]
@@ -30,69 +43,72 @@ POST /rag        → validate_query() → run_rag()          [RAG only, no inten
 POST /analytics  → validate_query() → run_analytics()     [analytics only]
 ```
 
-`run_query()` (the only path with real branching) does, in order:
+`run_query()` does, in order:
 
 ```
 sanitize_input
-  → detect_language
-    → detect_intent (heuristic, then LLM if heuristic confidence < 0.80)
-      → [reject]  → done
-      → [analytics] → run_analytics(...)                → done
-      → [rag]     → process_query (rewrite/translate)
-                  → run_rag(...)  [retrieve_top_k → build_context → llm.run]
-                  → score_answer
-                  → [low-confidence fallback, if final_score < 0.12] → done
-                  → generate_insight
-                  → translate_en_to_id (if user_lang == "id")        → done
+  → detect_language                        (observed stage: language_detection)
+    → detect_intent                        (heuristic; LLM if heuristic confidence < 0.80)
+      → [reject]    → done
+      → [analytics] → run_analytics(...)   → done
+      → [rag]       → process_query (rewrite/translate)
+                    → run_rag(...)         [retrieve (+rank) → build_context → llm.run]
+                    → score_answer         (not instrumented)
+                    → [low-confidence fallback, final_score < 0.12] → done
+                    → generate_insight     (LLM purpose rag_insight)
+                    → translate_en_to_id   (if user_lang == "id")   → done
 ```
 
-`run_rag()`'s `retrieve_top_k` call already does its own sub-pipeline
-(embed query → `match_documents` RPC → `rerank_chunks`). (A second path,
-`merchant_inference_mode`, existed historically and was removed; merchant
-ranking questions are now answered by analytics SQL.)
+Routing note: ranking/aggregation questions over the transaction dataset
+(for example "which merchants have the highest fraud incidence") route to
+**analytics**; conceptual and report-based questions route to **RAG**.
+Ambiguous queries (heuristic confidence < 0.80) are decided by the LLM.
 
-`run_analytics()` does: `classify_analytics_intent` → `nl_to_sql` (template
-or LLM-generated) → `execute_sql` → summarize → optional
-`refine_summary_with_llm`.
+`retrieve_top_k` is one function with two observable stages: retrieval
+(embed query → `match_documents` RPC) and ranking (`rerank_chunks`).
+`run_rag()` never calls them separately, so the stage boundary lives inside
+`src/rag/retriever_direct.py`.
 
-**The LLM client (`llm.run`) is called from at least 8 different call sites**
-(intent classification, language-detection fallback, translation ×2, query
-rewrite, RAG answer generation, analytics NL→SQL,
-analytics summary refinement, LLM reranking) — a single request can invoke it
-multiple times. Every event schema below assumes this: `llm.completed` is a
-repeatable event tagged with a `purpose`, not a once-per-request event.
+`run_analytics()` does: `classify_analytics_intent` → `nl_to_sql` (template,
+or LLM-generated for the `generic` intent only) → `execute_sql` → summarize
+→ optional `refine_summary_with_llm`.
+
+The LLM client (`llm.run`) is called from several sites, and one request can
+invoke it multiple times. `llm.completed` is therefore a repeatable event
+tagged with `purpose`, never a once-per-request event.
+
+Rate-limited requests (HTTP 429) are rejected in middleware **before** the
+router runs. They get no `request_id` and emit no events today (see §4).
 
 ---
 
-## 2. Request-level record
+## 2. Request-level record [implemented, narrower than M2 intended]
 
-One record per incoming HTTP request, emitted at `request.completed`:
+One `request.completed` event per request, emitted by the router handler
+(exactly one, including on an unhandled exception).
 
-| Field | Type | Notes |
+| Field | Where | Notes |
 |---|---|---|
-| `request_id` | uuid4 string | Generated once, in `api/routers.py`, **before** `validate_query()` runs, so even a guardrail rejection gets a `request_id`. |
-| `route` | `"query" \| "rag" \| "analytics"` | Which endpoint. |
-| `intent` | `"rag" \| "analytics" \| "reject" \| null` | Only set on the `/query` route; null for `/rag` and `/analytics` (they don't route). |
-| `lang` | `"en" \| "id"` | |
-| `started_at`, `completed_at`, `duration_ms` | ISO8601, ISO8601, int | |
-| `status` | `"success" \| "blocked" \| "rate_limited" \| "error"` | **Outcome only.** A request that hit the low-confidence fallback and still returned a usable answer is `status=success` — see `fallback_used`/`fallback_reason` below. Don't fold a business-logic path (fallback) into the same enum as a hard outcome (blocked/rate-limited/error); it makes "did this request succeed?" ambiguous to query later. |
-| `error` | string \| null | Present when `status == "error"`. |
-| `cost_usd_total` | float | Sum of this request's `llm.completed` events. **See §5 known gap** — today's cost tracking is process-global, not per-request; this field cannot be trusted until that's fixed. |
-| `fallback_used` | bool | True if `llm.fallback` or the low-confidence fallback fired anywhere in this request, independent of `status`. |
-| `fallback_reason` | `null \| "low_confidence" \| "budget_threshold"` | Which fallback fired, if any. Only these two exist in code today (orchestrator's `final_score < 0.12` branch, and `LLMClient`'s cost-threshold model downgrade) — not a placeholder for reasons that aren't implemented. |
+| `request_id` | envelope | uuid4, assigned in `api/routers.py` before `validate_query()`, so even a guardrail rejection is correlatable. |
+| `status` | envelope | Request-level: `success`, `blocked`, `error`. `rate_limited` is **not** emitted (§4). `success` means the handler completed normally; it does **not** assert the business operation succeeded — a pipeline that catches its own exception and returns an `error` dict still yields `success` here. |
+| `duration_ms` | envelope | Real handler duration, integer ms. |
+| `metadata.route` | metadata | `/query`, `/rag`, `/analytics`. |
+| `metadata.error_type` | metadata | Present only when `status == "error"`. Exception class name only. |
+
+Fields the M2 contract listed for this record that are **not emitted today**:
+`intent`, `lang`, `started_at`/`completed_at`, `error` (message),
+`cost_usd_total`, `fallback_used`, `fallback_reason`. The `intent` is
+available from `intent.completed`. Request-level cost is M7 (§8).
 
 ---
 
-## 3. Event envelope
-
-Every stage emits **one event on success, one on failure**, never both,
-never zero (a stage that starts must emit exactly one terminal event):
+## 3. Event envelope [implemented]
 
 ```json
 {
   "schema_version": 1,
-  "timestamp": "2026-09-26T18:24:00.123Z",
-  "request_id": "8d9f2a41-...",
+  "timestamp": "...",
+  "request_id": "...",
   "event": "retrieval.completed",
   "step": "retrieval",
   "status": "success",
@@ -101,160 +117,294 @@ never zero (a stage that starts must emit exactly one terminal event):
 }
 ```
 
-`schema_version` starts at `1` and only increments on a breaking change to
-this envelope or an existing field's meaning (adding a new optional
-`metadata` key is not breaking; removing/renaming a field, or changing what
-an existing field means, is). This is what lets a future trace viewer or
-metrics job know which shape it's reading without guessing.
-
-`event` is always `"{step}.{outcome}"`. `status` is one of `success | failure
-| blocked | skipped`. `skipped` covers stages that don't run for a given
-request (e.g. `ranking.skipped` when retrieval returned zero candidates).
-(Note: this is the *stage*-level `status` enum, distinct from the
-*request*-level `status` enum in §2 — a stage can be `blocked` while the
-request's own status is still `success`, e.g. guardrails never fired but one
-LLM call inside the request retried and failed before a fallback recovered.)
+- `schema_version` increments only on a breaking change (removing or
+  renaming a field, or changing what an existing field means). Adding an
+  optional `metadata` key is not breaking.
+- `event` is `"{step}.{outcome}"`.
+- Stage-level `status` is one of `success | failure | blocked | skipped`.
+  Request-level `status` (§2) is a different enum; the two are not unified.
+- `duration_ms` is an integer in milliseconds. It is `null` for start
+  markers and unmeasured events, never a fabricated `0`. A measured stage
+  faster than the rounding resolution can legitimately report `0`; do not
+  force a minimum of `1`.
+- Parent/child durations are **not additive**; do not treat a parent's
+  duration as the sum of its children.
+- A stage that starts emits exactly one terminal event.
 
 ---
 
-## 4. Stage catalog
+## 4. Event catalog [implemented]
 
-Grounded in the actual function that owns each stage, so an implementer
-knows exactly where the instrumentation call goes.
+Only events the code actually emits are listed.
 
-| Event | Owning code | metadata |
+| Event | Emitted from | metadata |
 |---|---|---|
-| `request.started` | `api/routers.py`, before `validate_query` | `route` |
-| `guardrails.completed` / `guardrails.blocked` | `src/safety/guardrails.py::validate_query` | `blocked` (bool), `reason` (`too_short\|noise\|injection\|out_of_domain\|null`), `query_length`, `query_hash` (see §6 — never raw text) |
-| `language_detection.completed` | `src/rag/question_rewrite.py::detect_language` | `lang`, `method` (`heuristic\|llm_fallback`) |
-| `intent.completed` | `src/orchestrator.py::detect_intent` | `intent`, `confidence`, `method` (`heuristic\|llm`), `route` |
-| `retrieval.completed` / `retrieval.empty` | `src/rag/retriever_direct.py::retrieve_top_k` | `retrieval_method` (`vector_rpc\|disabled`), `candidate_count`, `selected_count`, `source_filter` |
-| `ranking.completed` / `ranking.skipped` | `src/rag/ranking.py::rerank_chunks` | `candidate_count`, `selected_count`, `reranker` (`hybrid\|hybrid+llm`), `top_result_score`, `embeddings_available` (bool) |
-| `llm.completed` / `llm.failed` | `src/llm/llm_client.py::LLMClient.run` | `purpose` (`intent_classification\|language_detection\|translation\|query_rewrite\|rag_answer\|analytics_nl_to_sql\|analytics_summary\|llm_rerank`), `model`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `estimated_cost_usd`, `retry_count`, `fallback_triggered` (bool) |
-| `llm.fallback` | `LLMClient.run`, budget-downgrade branch | `from_model`, `to_model`, `reason` (`budget_threshold` — the only reason implemented today; `failure`/`timeout` are not distinguished by current code, see §5), `cumulative_session_cost_usd` |
-| `analytics.sql_executed` | `src/analytics/fraud_analytics.py::execute_sql` | `template` (`merchant_rank\|category_rank\|timeseries\|llm_generated`), `row_count`, `truncated` (bool) |
-| `analytics.completed` | `run_analytics` return | `intent`, `confidence`, `chart_generated` (bool) |
-| `scoring.completed` | `src/llm/scoring.py::score_answer` | `final_score`, `gate` (`heuristic_early_exit\|full_ensemble`), `used_llm_judge` (bool) |
-| `fallback.low_confidence` | `src/orchestrator.py`, `final_score < 0.12` branch | `score`, `threshold` |
-| `rate_limit.blocked` | `src/safety/rate_limit.py::RateLimitMiddleware` | `client_id_hash`, `count`, `limit` |
-| `request.completed` | end of the router handler | `route`, `intent`, `status`, `total_cost_usd`, `fallback_used` |
+| `request.started` | `api/routers.py` | `route` |
+| `guardrails.completed` / `guardrails.blocked` | `api/routers.py` (decision from `validate_query`) | `blocked`, `reason` (`too_short\|noise\|injection\|out_of_domain\|null`), `query_length`, `query_hash` |
+| `language_detection.completed` / `.failed` | `src/orchestrator.py` via `observe_step` | none (`observe_step` carries no metadata by design) |
+| `intent.completed` / `intent.failed` | `src/orchestrator.py` | completed: `intent`, `confidence` (`null` when decided by the LLM), `method` (`heuristic\|llm`), `route`. failed: `error_type` |
+| `retrieval.completed` | `src/rag/retriever_direct.py` | `retrieval_method` (`vector_rpc`), `candidate_count`, `source_filter`. A successful retrieval with zero candidates is still `completed` with `candidate_count=0`. |
+| `retrieval.skipped` | same | `retrieval_method`, `reason` (`retriever_disabled\|no_embedding`), `candidate_count=0`, `selected_count=0`, `source_filter` |
+| `retrieval.failed` | same | `retrieval_method`, `error_type`, `source_filter` |
+| `ranking.completed` | same | `candidate_count`, `selected_count`, `reranker` (`hybrid`; production always uses `use_llm=False`) |
+| `ranking.skipped` | same | `candidate_count=0`, `selected_count=0` (retrieval succeeded with nothing to rank) |
+| `ranking.failed` | same | `candidate_count`, `error_type` |
+| `llm.completed` | `src/llm/llm_client.py::LLMClient.run` | `purpose`, `model`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `estimated_cost_usd`, `retry_count`. Token and cost fields are `null` when the provider returned no usage. One terminal event per `run()` call, covering the whole retry loop. |
+| `llm.failed` | same | `purpose`, `model`, `retry_count`, `error_type`. Emitted once when retries are exhausted; `run()` then raises `LLMExhaustedRetriesError`. |
+| `llm.fallback` | same | `purpose`, `from_model`, `to_model`, `reason` (`budget_threshold`, the only implemented reason), `cumulative_session_cost_usd` |
+| `analytics.sql.completed` | `src/analytics/fraud_analytics.py` | `intent`, `used_fallback_sql`, `primary_error_type`, `row_count` |
+| `analytics.sql.failed` | same | `intent`, `used_fallback_sql`, `primary_error_type`, `error_type` |
+| `analytics.completed` | same | success: `intent`, `confidence`, `chart_generated`. failure: `error_type`. An honest "insufficient data" answer is `success`; only an unexpected internal failure is `failure`. |
+| `request.completed` | `api/routers.py` | see §2 |
 
-Stages **not** instrumented individually (per the plan's "meaningful
-boundaries, not every helper" principle): `sanitize_input`, `process_query`'s
-internal rewrite/translate sub-steps, `build_context`, `to_chart_data`. These
-are cheap, deterministic, and already covered by the stage that calls them.
+`llm.purpose` values emitted by code: `intent_classification`,
+`language_detection`, `translation`, `query_rewrite`, `rag_answer`,
+`rag_insight`, `analytics_nl_to_sql`, `analytics_summary`, `llm_rerank`
+(`llm_rerank` exists as a call site but is not reached in production,
+because ranking runs with `use_llm=False`).
 
----
+**Removed from the catalog (never emitted by the code):**
 
-## 5. Known gaps this contract depends on (must fix before M6, not work around)
+| Removed | Why / current equivalent |
+|---|---|
+| `analytics.sql_executed` | Replaced by `analytics.sql.completed` / `analytics.sql.failed`. |
+| `retrieval.empty` | There is no such event. Zero results after a successful retrieval is `retrieval.completed` with `candidate_count=0`; a retrieval that did not run is `retrieval.skipped`. |
+| `scoring.completed` | `score_answer` is not instrumented. |
+| `fallback.low_confidence` | The `final_score < 0.12` fallback in the orchestrator emits no event. |
+| `rate_limit.blocked` | The middleware returns 429 and writes a log line only. |
 
-Writing this contract surfaced two real defects in the current code that
-would make the telemetry **lie** if instrumentation were bolted on as-is:
+Re-adding any of these is an explicit decision, not an assumed catalog entry.
 
-1. **`LLMClient.run` never raises.** After `MAX_RETRIES` failed attempts it
-   returns the literal string `"LLM failed after retries."` as if it were a
-   valid answer. An `llm.completed` event built on top of this today would
-   report `status=success` for a call that actually failed 4 times. Before
-   M6, `run()` needs to either raise on exhaustion or return a typed
-   failure the caller can check — the observability layer should not paper
-   over this by string-matching the sentinel text.
-2. **Cost tracking is process-global (`SESSION_COST_USD`), not per-request.**
-   Under concurrent requests, `cost_usd_total` per request and
-   `llm.fallback`'s budget-threshold trigger are both attributing one
-   shared counter to whichever request happens to be running. This contract
-   defines `cost_usd_total` as a per-request field on the assumption this
-   gets fixed; until then, treat that field as approximate under concurrency.
-3. **The orchestrator and pipeline functions already catch broad
-   `Exception`** and return `{"error": str(e)}` dicts instead of letting
-   exceptions propagate. The instrumentation wrapper (M5) must therefore
-   check the returned `error` field, not rely solely on catching exceptions
-   at the boundary, or failures will be silently recorded as `success`.
-
-None of these are fixed by this document. They're listed here because they
-block M6 from producing *correct* telemetry, not just present telemetry.
+Not instrumented individually (by design): `sanitize_input`, the internal
+steps of `process_query`, `build_context`, `to_chart_data`.
 
 ---
 
-## 6. Privacy rules (non-negotiable, not just "prefer")
+## 5. Known gaps [status after M6]
 
-This is a fraud-intelligence system; queries and documents can plausibly
-contain personal data. Under UU PDP's data-minimization principle, telemetry
-that isn't needed to answer "what happened?" must not exist. (Exact article
-numbers to confirm with legal/compliance — not guessing them here.)
+Fixed:
+1. **`LLMClient.run` never raising** — fixed. Exhausted retries raise
+   `LLMExhaustedRetriesError` and emit `llm.failed`; no sentinel string.
+2. **Per-request cost accumulation** — fixed as a prerequisite. A
+   request-scoped accumulator (`src/observability/cost.py`) sums per-call
+   estimated cost. It is **not yet exposed** in any event (§8).
+3. **`details=str(e)` information leak** — fixed after M6 (§10).
 
-- **Never** log raw query text in any structured event. Use `query_hash`
-  (sha256, first 12 hex chars — enough to correlate identical queries
-  without reversing them) and `query_length` instead.
-- **Never** log full document/chunk content. Use `document_id` / `source_name`
-  / `page` / `rank` / `score` only (already the plan's own guidance, and
-  matches what `build_citations` already exposes).
-- **Never** log full LLM prompts or completions in structured events — token
-  counts and cost only. Free-text `logger.debug(...)` calls may still exist
-  for local debugging, but must never run at `INFO` in a deployed
-  environment and must be excluded from whatever aggregates/exports events.
-- **Client IP** (used by the rate limiter) may be held in-memory as raw IP
-  since it never leaves the process today. If rate-limit events are ever
-  exported/persisted, hash or truncate the IP first — an IP is personal data
-  under UU PDP once it's retained.
-- This closes an existing gap, not just a future rule: current code already
-  logs raw query text at `INFO` in `src/orchestrator.py`,
-  `src/rag/retriever_direct.py`, and `src/analytics/fraud_analytics.py`
-  (e.g. `f"query={query!r}"`). Implementing this contract means changing
-  those call sites, not just adding new ones alongside them.
+Still open:
+4. **Pipelines catch broad `Exception`** and return `error` dicts, so
+   `request.completed(status=success)` does not imply a successful business
+   outcome. Documented in §2; a business-outcome field is not part of this
+   contract.
+5. **Process-global budget guard** (`SESSION_COST_USD`) is intentionally
+   global and separate from request attribution (§8).
+6. **Rate-limited requests are invisible** to the event stream (§4).
 
 ---
 
-## 7. Failure semantics
+## 6. Privacy rules [implemented, non-negotiable]
 
-- An instrumentation wrapper emits the failure event **and then re-raises**
-  (or returns the same error it would have without instrumentation).
-  Observability must never change what the caller receives.
-- A stage that didn't run emits `skipped`, not silence — a missing event for
-  an expected stage should itself be a visible anomaly, not ambiguous with
-  "wasn't recorded."
-- See §5 for why "no exception seen" ≠ "succeeded" in this codebase today.
+Under UU PDP's data-minimization principle (exact articles to be confirmed
+with legal/compliance), telemetry that is not needed to answer "what
+happened?" must not exist.
+
+- Never put raw query text in a structured event. Use `query_hash` (sha256,
+  first 12 hex chars) and `query_length`.
+- Never put document or chunk content in an event. Only counts and
+  identifiers-free aggregates are emitted today.
+- Never put prompts or completions in an event. Token counts and cost only.
+- Never put exception messages in an event. Use `error_type` (class name).
+- **Executed SQL is returned to the API caller in the analytics response
+  (`sql`), but is excluded from telemetry.** The response field grounds the
+  answer; events carry only `intent`, `used_fallback_sql`, `row_count` and
+  error types.
+- Client IP is held in memory by the rate limiter only and is never emitted.
+  If rate-limit events are ever added, hash or truncate the IP first.
 
 ---
 
-## 8. Example trace (illustrative — not from a real run; no code exists yet)
+## 7. Failure semantics [implemented]
 
+- Instrumentation emits the failure event and then re-raises (or returns the
+  same value it would have without instrumentation). Observability never
+  changes what the caller receives.
+- A stage that did not run emits `skipped`, not silence.
+- "No exception seen" is not "succeeded" in this codebase: see §5 item 4.
+- The retriever fails closed (empty result) rather than raising. The RAG
+  result now carries `retrieval_status` (`ok|empty|unavailable`) so callers
+  can tell an outage from a genuine no-result; the event stream already
+  distinguishes the two via `retrieval.failed`/`.skipped` vs
+  `retrieval.completed` with `candidate_count=0`.
+
+---
+
+## 8. M7 cost contract [design-only, not yet implemented]
+
+Request-level cost is not emitted today. M7.1 will add it to
+`request.completed`.
+
+```text
+cost_status:
+  not_applicable   no LLM call occurred in the request
+  complete         every LLM call has attributable cost
+  partial          at least one call's cost is unknown, others known
+  unknown          an LLM call occurred and no cost is attributable
+
+cost_usd_total:
+  0.0              when not_applicable
+  known total      when complete
+  known partial    when partial (a lower bound)
+  null             when unknown
 ```
-request_id: 8d9f2a41-...
-route: query · intent: rag · lang: en · status: success
-total: 1,842 ms · cost: $0.00042 · fallback_used: false · fallback_reason: null
 
-  0 ms   request.started            route=query
-  4 ms   guardrails.completed       blocked=false
- 18 ms   language_detection.completed  lang=en method=heuristic
- 32 ms   intent.completed           intent=rag confidence=0.90 method=heuristic
- 72 ms   retrieval.completed        method=vector_rpc candidates=42 selected=5
-160 ms   ranking.completed          reranker=hybrid top_result_score=0.87
-1020 ms  llm.completed              purpose=rag_answer model=gpt-4o-mini
-                                    tokens=1058 cost=$0.00018 retries=0
-1650 ms  scoring.completed          final_score=0.88 gate=full_ensemble
-1842 ms  request.completed          status=success
-```
+Rules:
+- **Unknown is never `$0.00`.** Missing provider usage and an unpriced model
+  are both "unknown". Today `estimate_cost()` returns `0.0` for an unknown
+  model; M7.1 must change that.
+- Input and output tokens are priced distinctly in M7.1. Today a single
+  per-1K price is applied to the sum of both.
+- Fallback-model calls count toward request cost (both models' costs are
+  summed).
+- A request that errors or hits the low-confidence fallback still reports
+  the cost of the LLM calls that already completed.
+- Attribution for failed or retried calls (billable attempts that produced
+  no usable response) needs explicit semantics in M7.1; until then a call
+  that exhausted retries adds no cost.
+- Request attribution is **separate** from the process-global budget guard.
+  `SESSION_COST_USD >= MAX_COST_USD` (downgrade policy across many
+  requests) must not be merged with per-request cost.
 
 ---
 
-## 9. Non-goals (for now)
+## 9. M7 metric cardinality policy [design-only, not yet implemented]
 
-No OpenTelemetry, no Prometheus, no external backend. This contract is the
-internal abstraction; a later OTel exporter translates *from* these events,
-the application never calls into a vendor SDK directly. Metrics (M8) are
-derived from these events after M3–M7 land, not designed in parallel with
-them.
+Metrics are derived from events; they do not replace them. Every metric
+dimension must be bounded and non-sensitive.
+
+Allowed dimensions (bounded):
+
+```text
+route, status, intent, lang
+llm: purpose, model, outcome
+fallback: reason
+retrieval: retrieval_method, outcome
+ranking: reranker, outcome
+analytics: intent (timeseries|merchant_rank|category_rank|generic),
+           used_fallback_sql, outcome
+```
+
+Prohibited as metric dimensions (high-cardinality or sensitive; fine as
+event-level correlation fields where they already exist, never as labels):
+
+```text
+request_id, query_hash, raw query, SQL, error text, prompt/completion,
+document content or IDs, source names, client identifiers, timestamps
+```
+
+Operational questions M7 must be able to answer: request error and block
+rate and latency; LLM failure, retry and fallback rate, tokens and cost;
+retrieval success, skip, failure and empty-result rate; ranking failure
+rate; analytics SQL fallback and failure rate; and how many LLM calls each
+`purpose` makes per request.
+
+Derived, not re-emitted: latency percentiles come from
+`request.completed.duration_ms`; rates come from terminal event counts.
+
+---
+
+## 10. Post-M6 changes reconciled
+
+Applied after the M6 freeze (`513f4b4`):
+
+- **`merchant_inference_mode` removed.** Merchant/category ranking questions
+  are answered by analytics SQL. The `merchant_inference` retrieval method
+  and LLM purpose no longer exist. If SQL cannot answer, the system says so
+  rather than falling back to a document-wide LLM read (see
+  `docs/failure_modes.md` §4.3).
+- **Analytics responses include `sql`** (the exact executed statement).
+  Excluded from telemetry (§6).
+- **Retriever exposes `retrieval_status`** (`ok|empty|unavailable`) in the
+  RAG result. No new event; the `retrieval.*` events already distinguish the
+  cases.
+- **`details=str(e)` leak fixed.** Analytics error responses and the
+  orchestrator's `error` field no longer carry exception text; unsafe-SQL
+  rejection no longer echoes the SQL.
+- **LLM exhaustion and request-scoped cost prerequisites** are fixed (§5).
+
+---
+
+## 11. Observed M6 traces — test/mock traces, not production traffic
+
+These were captured from M6 runs against mocked/test dependencies. They are
+condensed: only event names and key metadata are shown. Request IDs, token
+counts and cost values are omitted here rather than reconstructed.
+
+**RAG `/query`** (request `duration_ms` = 4):
+
+```text
+request.started
+  llm.completed        purpose=language_detection
+  guardrails.completed
+  llm.completed        purpose=language_detection
+  language_detection.completed
+  intent.completed     intent=rag confidence=0.90 method=heuristic
+  llm.completed        purpose=language_detection
+  retrieval.completed  candidate_count=2
+  ranking.completed    candidate_count=2 selected_count=2
+  llm.completed        purpose=rag_answer
+  llm.completed        purpose=rag_insight
+request.completed
+```
+
+**Analytics `/query`** (request `duration_ms` = 9):
+
+```text
+request.started
+  guardrails.completed
+  language_detection.completed
+  intent.completed     intent=analytics confidence=0.95 method=heuristic
+  analytics.sql.completed  intent=timeseries used_fallback_sql=false row_count=3   (3 ms)
+  analytics.completed      confidence=0.8602 chart_generated=true                  (6 ms)
+request.completed
+```
+
+Observations (descriptive, not contract):
+- The RAG trace contains **three** `llm.completed` events with
+  `purpose=language_detection` but only **one** `language_detection.completed`.
+  The LLM-call events and the stage event measure different things: the
+  stage event is the orchestrator's language-detection stage; the LLM events
+  are every call made for that purpose.
+- The analytics trace shows the intended hierarchy (intent → sql →
+  analytics) with `analytics.sql` nested inside `analytics`. Durations of
+  children are not additive and must not be asserted as a contract.
+
+### Finding: repeated language detection
+
+`detect_language()` currently executes three times along the `/query` path:
+
+- `src/safety/guardrails.py::validate_query`
+- `src/orchestrator.py::run_query` (ignores the `detected_lang` already
+  passed in by the router)
+- `src/rag/question_rewrite.py::process_query`
+
+This is recorded as an **observability finding**. M7 measures it
+(`llm_calls_total{purpose="language_detection"}` per request); consolidation
+is outside M7.0 and is not part of M7's scope.
+
+---
+
+## 12. Non-goals
+
+For M7.0 and M7 generally: no Prometheus implementation, no OpenTelemetry,
+no Grafana or dashboards, no event database or broker, no alerting, and no
+language-detection refactor. A later exposure/export layer (M8) translates
+*from* these events; the application never calls a vendor SDK directly.
 
 ---
 
 ## Relationship to `docs/observability.md`
 
-That document already describes this target state in places (`query_id`
-propagation, structured events, cost/latency tracking) — but it's aspirational:
-today's logger (`src/utils/logger.py`) emits plain-text lines with no
-`query_id`/`request_id` at all, and none of the described events exist in
-code. This contract is the concrete, implementable version of that same
-intent, using `request_id` as the canonical field name (synonymous with that
-document's `query_id` — Phase 20 of the plan is to reconcile terminology and
-rewrite `docs/observability.md` to describe the system as it actually is,
-once M3–M9 are built).
+That document is aspirational and predates M3–M6 (it describes `query_id`
+and cost/latency tracking that this contract and the M3–M6 code now define
+precisely). `request_id` is the canonical field name. Rewriting
+`docs/observability.md` to match reality is deferred to the documentation
+milestone.
