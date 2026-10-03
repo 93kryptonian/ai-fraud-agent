@@ -38,7 +38,6 @@ import time
 
 import pytest
 
-from src.observability.events import emit_event
 from src.observability.timing import elapsed_timer, observe_step
 
 

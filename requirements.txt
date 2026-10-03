@@ -17,24 +17,20 @@ uvicorn==0.34.0
 # LLM Clients & Tokenization
 # ======================================================
 openai==2.8.1
-anthropic==0.71.0
 tiktoken==0.12.0
 httpx==0.27.2
-httpx-sse==0.4.3
 
 # ======================================================
 # Data & Analytics
 # ======================================================
 pandas==2.3.3
 numpy==2.3.5
-scikit-learn==1.7.2
 
 # ======================================================
 # RAG & Retrieval
 # ======================================================
 pypdf==6.4.0
 rank-bm25==0.2.2
-sentencepiece==0.2.1
 
 # Lightweight LangChain utilities (no agents, no chains)
 langchain-core==1.1.0
