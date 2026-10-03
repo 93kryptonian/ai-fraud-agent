@@ -449,9 +449,15 @@ def test_runtime_captured_events_replay_with_nothing_unclassified(runtime_events
 
     assert snap["metrics"]["signals_unclassified_total"][0]["value"] == 0
     assert snap["meta"]["events_observed"] == len(runtime_events)
-    assert sum(series(snap, "requests_total").values()) == 3
+    # 3 router requests + 1 allowed by the rate-limit driver (its 2 rejected
+    # requests are NOT request.completed; they are rate_limited_total)
+    assert sum(series(snap, "requests_total").values()) == 4
+    assert sum(series(snap, "rate_limited_total").values()) == 2
+    assert val(snap, "rate_limited_total", route="/query") == 1
+    assert val(snap, "rate_limited_total", route="other") == 1
     assert val(snap, "requests_total", route="/query", status="blocked") == 1
-    assert val(snap, "requests_total", route="/query", status="error") == 1
+    # the router driver's failing handler, plus the rate-limit driver's allowed request
+    assert val(snap, "requests_total", route="/query", status="error") == 2
     assert val(snap, "analytics_sql_total", status="failure", intent="timeseries",
                used_fallback_sql="true") == 1
     assert val(snap, "llm_fallbacks_total", purpose="rag_answer", reason="budget_threshold") == 1

@@ -54,6 +54,7 @@ HELP: Dict[str, str] = {
     "requests_total": "Completed API requests by route and request status.",
     "request_duration_ms": "Request duration in milliseconds.",
     "request_cost_usd_total": "Known estimated LLM cost in USD per request outcome; a lower bound when partial.",
+    "rate_limited_total": "Requests rejected by the rate limiter before the request lifecycle, by route.",
     "llm_calls_total": "Terminal LLM calls by purpose, model and status.",
     "llm_duration_ms": "LLM call duration in milliseconds (whole retry loop).",
     "llm_retries_total": "Retries beyond the first attempt across LLM calls.",
