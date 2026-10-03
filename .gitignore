@@ -7,3 +7,5 @@ __pycache__/
 *.pyc
 .env
 .DS_Store
+.ingest_cache/
+.qodo/
