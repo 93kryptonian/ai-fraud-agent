@@ -239,7 +239,22 @@ def dimensions_for(event_dict: Dict[str, Any]) -> Dict[str, str]:
 
 
 def series_upper_bound(event: str) -> int:
-    """Product of every dimension's domain size (+ the "other" bucket)."""
+    """
+    Theoretical upper bound on label combinations if every dimension of the
+    event were used together: the product of each dimension's domain size
+    plus the "other" overflow bucket.
+
+    Two rules keep the bound honest rather than inflated:
+    - the error-class domain is counted once (a metric uses at most one
+      error-class dimension per event);
+    - a dimension whose domain has exactly ONE value is a constant (for
+      example the envelope `status` of an event type such as `llm.failed`,
+      which is fixed by the event name, or a single `retrieval_method`). It
+      cannot take a second value, so it contributes a factor of 1, not 2:
+      counting an "other" bucket there would be fictitious cardinality.
+      `dimension_value()` still maps an unexpected value to "other"; value
+      drift in code is caught by the domain-sync tests, not by this bound.
+    """
     from src.llm.llm_client import PRICES_PER_1M
 
     bound = 1
@@ -260,7 +275,10 @@ def series_upper_bound(event: str) -> int:
             # a distinct configured default and fallback, plus "other".
             bound *= len(PRICES_PER_1M) + 2 + 1
         else:
-            bound *= len(_domain_values(rule) | {OTHER})
+            values = _domain_values(rule)
+            if len(values) == 1:
+                continue  # constant dimension: factor 1 (see docstring)
+            bound *= len(values | {OTHER})
     return bound
 
 

@@ -344,8 +344,14 @@ Rules:
 - The policy defines **no metric names** and is not wired into `emit_event()`.
   Metric selection, aggregation and export are M7.3 / M8.
 - Series upper bounds below are theoretical (every dimension of the event
-  used together, error domain counted once); a metric need not use them all.
-  Each must stay at or under the cap.
+  used together); a metric need not use them all. Each must stay at or under
+  the cap. Two rules keep the bound from being inflated: the error-class
+  domain is counted once, and a dimension with exactly one possible value (a
+  constant such as the envelope `status` of an event type, which the event
+  name fixes) contributes a factor of 1, not 2, because an `other` bucket there
+  would be fictitious cardinality. Multi-valued dimensions still add the
+  `other` bucket. The `other` mapping itself is unchanged; value drift in code
+  is caught by the domain-sync tests.
 
 <!-- dimensions:start -->
 | Event | Key | Class | Allowed values |
@@ -440,26 +446,26 @@ Rules:
 | Event | Series upper bound |
 |---|---|
 | `analytics.completed` | 864 |
-| `analytics.sql.completed` | 576 |
-| `analytics.sql.failed` | 576 |
-| `guardrails.blocked` | 36 |
-| `guardrails.completed` | 36 |
-| `intent.completed` | 96 |
-| `intent.failed` | 32 |
-| `language_detection.completed` | 2 |
-| `language_detection.failed` | 2 |
-| `llm.completed` | 100 |
-| `llm.failed` | 1600 |
-| `llm.fallback` | 1000 |
-| `ranking.completed` | 4 |
-| `ranking.failed` | 32 |
-| `ranking.skipped` | 2 |
-| `rate_limit.blocked` | 8 |
+| `analytics.sql.completed` | 288 |
+| `analytics.sql.failed` | 288 |
+| `guardrails.blocked` | 18 |
+| `guardrails.completed` | 18 |
+| `intent.completed` | 48 |
+| `intent.failed` | 16 |
+| `language_detection.completed` | 1 |
+| `language_detection.failed` | 1 |
+| `llm.completed` | 50 |
+| `llm.failed` | 800 |
+| `llm.fallback` | 250 |
+| `ranking.completed` | 1 |
+| `ranking.failed` | 16 |
+| `ranking.skipped` | 1 |
+| `rate_limit.blocked` | 4 |
 | `request.completed` | 1280 |
-| `request.started` | 8 |
-| `retrieval.completed` | 4 |
-| `retrieval.failed` | 64 |
-| `retrieval.skipped` | 12 |
+| `request.started` | 4 |
+| `retrieval.completed` | 1 |
+| `retrieval.failed` | 16 |
+| `retrieval.skipped` | 3 |
 
 Cardinality cap per event: 2000.
 <!-- dimensions:end -->
