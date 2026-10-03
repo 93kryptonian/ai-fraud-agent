@@ -1,10 +1,10 @@
-# Observability Contract (reconciled after M6)
+# Observability Contract (reconciled after M6, through M7.3)
 
 Status: **reconciled after M6, updated for M7.1.** M6 is implemented and
 frozen at `513f4b4`. Sections marked **[implemented]** describe what the code
 emits today (M7.1 request-level cost is implemented, §8). Sections marked
 **[design-only]** describe M7 design direction; nothing in them is
-implemented yet. (M7.2 dimension policy, §9, is implemented.)
+implemented yet. (M7.2 dimension policy, §9, and M7.3 operational signals, §13, are implemented.)
 
 This document began as the M2 contract. It has been reconciled against the
 actual code: events the M2 text promised but the code never emitted were
@@ -458,7 +458,7 @@ Operational questions the policy must support: request error and block rate
 and latency by `route`; LLM failure, retry and fallback rate, tokens and cost
 by `purpose` and `model`; retrieval success, skip and failure rate;
 ranking failure rate; analytics SQL fallback and failure rate; and how many
-LLM calls each `purpose` makes per request.
+LLM calls each `purpose` makes per request (answered in §13 by `llm_calls_per_request`).
 
 Derived, not re-emitted: latency percentiles come from
 `request.completed.duration_ms`; rates come from terminal event counts.
@@ -541,8 +541,8 @@ Observations (descriptive, not contract):
 - `src/rag/question_rewrite.py::process_query`
 
 This is recorded as an **observability finding**. M7 measures it
-(`llm_calls_total{purpose="language_detection"}` per request); consolidation
-is outside M7.0 and is not part of M7's scope.
+(`llm_calls_per_request{purpose="language_detection"}`, §13); consolidation
+is outside M7 and is not part of its scope.
 
 ---
 
@@ -552,6 +552,99 @@ For M7.0 and M7 generally: no Prometheus implementation, no OpenTelemetry,
 no Grafana or dashboards, no event database or broker, no alerting, and no
 language-detection refactor. A later exposure/export layer (M8) translates
 *from* these events; the application never calls a vendor SDK directly.
+
+---
+
+## 13. Operational signals [implemented in M7.3]
+
+`src/observability/signals.py` turns the event stream into operational
+signals:
+
+```text
+event dicts -> Aggregator.observe() -> in-memory state -> snapshot()
+```
+
+It is a **pure, replay-only** aggregator. It is not attached to
+`emit_event()`, has no global state or collector, and does no export or
+time-windowing; live wiring, vendor integration and rates over time are M8.
+The CLI is a replay/debug tool only:
+
+```text
+python -m src.observability.signals events.jsonl     # or stdin
+```
+
+Rules:
+- **Label traceability.** Every metric label is the envelope `status` or a
+  dimension-classified field of its source event (§9). Values go through
+  `dimension_value()`, so out-of-domain values become `other`. There are no
+  derived label mappings; `validate_specs()` enforces this.
+- **Absence is not zero.** Only observed series appear. An optional
+  dimension an event does not carry is omitted from the series, never filled
+  with a synthetic `none`. (A key present with a null value is a real emitted
+  value and normalizes to `none`.) Ratios are `null` when the denominator is
+  0.
+- **`request_id` is a grouping key only**, never a label.
+- **Unclassified input** (unknown event, unknown or forbidden key, malformed
+  input) is counted in `signals_unclassified_total` and skipped; it never
+  crashes the aggregator. `strict=True` raises, for tests.
+- **Cumulative only.** No time windows. Request volume is not HTTP volume
+  (rate-limited requests emit no events, §5).
+- **`llm.fallback` is a terminal event for the downgrade, not an LLM call
+  outcome.** `llm_fallbacks_total` counts it from its own event;
+  `llm_calls_total` counts only `llm.completed` / `llm.failed`.
+
+| Metric | Kind | Labels |
+|---|---|---|
+| `requests_total` | counter | `route`, `status` |
+| `request_duration_ms` | histogram | `route`, `status` |
+| `request_cost_usd_total` | sum | `route`, `cost_status` |
+| `llm_calls_total` | counter | `purpose`, `model`, `status` |
+| `llm_duration_ms` | histogram | `purpose` |
+| `llm_retries_total` | sum of `retry_count` | `purpose` |
+| `llm_retried_calls_total` | counter (completed, `retry_count` > 0) | `purpose` |
+| `llm_failures_total` | counter | `purpose`, `error_type` |
+| `llm_fallbacks_total` | counter | `purpose`, `reason` |
+| `llm_prompt_tokens_total`, `llm_completion_tokens_total` | sum | `purpose`, `model` |
+| `llm_cost_usd_total` | sum (non-null costs) | `purpose`, `model` |
+| `llm_cost_unknown_total` | counter (null cost) | `purpose`, `model` |
+| `retrieval_total` | counter | `status`, `retrieval_method`, `reason` (skipped only) |
+| `retrieval_empty_total` | counter (completed, `candidate_count` = 0) | `retrieval_method` |
+| `retrieval_failures_total` | counter | `error_type` |
+| `ranking_total` | counter | `status`, `reranker` (completed only) |
+| `analytics_total` | counter | `status`, `intent` |
+| `analytics_sql_total` | counter | `status`, `intent`, `used_fallback_sql` |
+| `analytics_failures_total` | counter (analytics failure) | `error_type` |
+| `intent_total` | counter | `status`, `intent`, `method` |
+| `guardrails_total` | counter | `status`, `reason` |
+| `language_detection_total` | counter | `status` |
+| `llm_calls_per_request` | histogram (per-request derived) | `purpose` |
+| `signals_unclassified_total`, `signals_dropped_requests_total` | counter (meta; `0` is a known value) | none |
+
+Sums report `{sum, count, null_count}`: a null value (unknown cost) is
+counted in `null_count` and never added as `0`.
+
+**Per-request signal.** `llm_calls_per_request{purpose}` is the number of LLM
+calls (`llm.completed` + `llm.failed`) a request made for one purpose,
+observed once per request per purpose. State is accumulated by `request_id`
+while the request is in flight and flushed on `request.completed`, after
+which it is removed. In-flight state is capped (10,000 requests); eviction is
+counted in `signals_dropped_requests_total`. Events with `request_id` `-`
+do not participate. This is the signal that makes the repeated
+language-detection finding (§11) queryable.
+
+**Histograms.** Fixed buckets in ms: 1, 5, 10, 25, 50, 100, 250, 500, 1000,
+2500, 5000, 10000, plus an implicit `+Inf` bucket so slower observations are
+kept. A null `duration_ms` is skipped, never treated as 0. Percentiles
+(`p50`, `p95`, `p99`) are **bucket upper-bound estimates**, not exact values;
+a percentile landing in the overflow bucket reports `+Inf`.
+
+**Rates** (cumulative, whole-snapshot ratios; `null` when undefined):
+`request_error_rate`, `request_block_rate`, `guardrail_block_rate`,
+`llm_failure_rate`, `llm_retry_rate` (retried completed calls / completed
+calls), `llm_fallback_rate` (fallbacks / LLM calls), `retrieval_empty_rate`
+(empty / successful retrievals), `retrieval_skip_rate`,
+`retrieval_failure_rate`, `ranking_failure_rate`, `analytics_failure_rate`,
+`analytics_sql_fallback_rate`.
 
 ---
 
