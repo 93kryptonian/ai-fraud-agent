@@ -18,6 +18,7 @@ Design goals:
 
 import os
 import re
+import threading
 import time
 from typing import Optional, Tuple, Type, Any, Dict, List
 
@@ -82,12 +83,32 @@ MAX_COST_USD = float(os.getenv("MAX_COST_USD", "0.10"))
 
 # Session-scoped soft budget (intentionally global)
 SESSION_COST_USD = 0.0
+# API requests run in worker threads, so `+=` on the shared total (and the
+# "warn once per model" set below) must be guarded.
+_SESSION_LOCK = threading.Lock()
+
+
+def _add_session_cost(cost: float) -> None:
+    """Thread-safe `SESSION_COST_USD += cost` (the process-wide budget guard)."""
+    global SESSION_COST_USD
+    with _SESSION_LOCK:
+        SESSION_COST_USD += cost
+
+
+def _warn_unpriced_once(model: str) -> bool:
+    """True the first time `model` is seen without a price (thread-safe)."""
+    with _SESSION_LOCK:
+        if model in _WARNED_UNPRICED_MODELS:
+            return False
+        _WARNED_UNPRICED_MODELS.add(model)
+        return True
 
 # =============================================================================
 # LAZY OPENAI CLIENT
 # =============================================================================
 
 _openai_client = None
+_CLIENT_LOCK = threading.Lock()
 
 
 def get_openai_client():
@@ -107,9 +128,11 @@ def get_openai_client():
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not set")
 
-    from openai import OpenAI  # local import → CI safe
-    _openai_client = OpenAI(api_key=OPENAI_API_KEY)
-    return _openai_client
+    with _CLIENT_LOCK:
+        if _openai_client is None:  # another thread may have created it first
+            from openai import OpenAI  # local import → CI safe
+            _openai_client = OpenAI(api_key=OPENAI_API_KEY)
+        return _openai_client
 
 # =============================================================================
 # COST ESTIMATION
@@ -247,8 +270,6 @@ class LLMClient:
         attempt. retry_count is the number of attempts beyond the first
         that were needed (0 if it succeeded on the first try).
         """
-        global SESSION_COST_USD
-
         selected_model = model or self.default_model
         extra_params = extra_params or {}
         last_error: Optional[Exception] = None
@@ -304,14 +325,13 @@ class LLMClient:
                         # Missing usage or unpriced model: cost unknown, never
                         # $0. The process-global guard cannot see it either.
                         add_unpriced_response()
-                        if selected_model not in _WARNED_UNPRICED_MODELS:
-                            _WARNED_UNPRICED_MODELS.add(selected_model)
+                        if _warn_unpriced_once(selected_model):
                             logger.warning(
                                 f"[llm] No attributable cost for model={selected_model}; "
                                 "budget guard cannot account for this usage"
                             )
                     else:
-                        SESSION_COST_USD += cost
+                        _add_session_cost(cost)
                         add_request_cost(cost)
 
                     text = (response.choices[0].message.content or "").strip()

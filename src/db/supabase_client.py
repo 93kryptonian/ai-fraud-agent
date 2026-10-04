@@ -14,6 +14,7 @@ Design principles:
 """
 
 import os
+import threading
 from typing import Any, Dict, List, Optional, Sequence
 
 from dotenv import load_dotenv
@@ -39,6 +40,7 @@ SQL_TIMEOUT_MS = int(os.getenv("SQL_TIMEOUT_MS", "15000"))
 # =============================================================================
 
 _supabase_client: Optional[Client] = None
+_CLIENT_LOCK = threading.Lock()
 
 
 def get_supabase() -> Client:
@@ -61,12 +63,14 @@ def get_supabase() -> Client:
             "Please set SUPABASE_URL and SUPABASE_ANON_KEY."
         )
 
-    logger.info("[db] Initializing Supabase client")
-    _supabase_client = create_client(
-        SUPABASE_URL,
-        SUPABASE_ANON_KEY,
-    )
-    return _supabase_client
+    with _CLIENT_LOCK:
+        if _supabase_client is None:  # another thread may have created it first
+            logger.info("[db] Initializing Supabase client")
+            _supabase_client = create_client(
+                SUPABASE_URL,
+                SUPABASE_ANON_KEY,
+            )
+        return _supabase_client
 
 # =============================================================================
 # OPTIONAL DB WRAPPER

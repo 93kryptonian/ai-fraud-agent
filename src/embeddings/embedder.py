@@ -11,6 +11,7 @@ Design goals:
 """
 
 import os
+import threading
 from typing import List, Optional
 
 from src.utils.logger import get_logger
@@ -35,6 +36,7 @@ DUMMY_VECTOR_DIM = EMBEDDING_DIM
 # =============================================================================
 
 _openai_client = None
+_CLIENT_LOCK = threading.Lock()
 
 
 def _get_openai_client():
@@ -55,9 +57,11 @@ def _get_openai_client():
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set")
 
-    from openai import OpenAI  # local import → CI safe
-    _openai_client = OpenAI(api_key=api_key)
-    return _openai_client
+    with _CLIENT_LOCK:
+        if _openai_client is None:  # another thread may have created it first
+            from openai import OpenAI  # local import → CI safe
+            _openai_client = OpenAI(api_key=api_key)
+        return _openai_client
 
 # =============================================================================
 # PUBLIC API

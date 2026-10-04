@@ -36,6 +36,13 @@ from src.observability.timing import elapsed_timer
 
 router = APIRouter(prefix="", tags=["api"])
 
+# These handlers are plain `def`, not `async def`, on purpose. They call
+# blocking code (LLM and embedding calls, retry backoff, PostgREST, psycopg2).
+# FastAPI runs a plain `def` handler in a worker thread; an `async def` handler
+# would run that blocking work ON the event loop and freeze every other request
+# (including /health) for as long as it takes. See docs/failure_modes.md,
+# "Failure containment contract".
+
 
 def _run_guardrails(route: str, query: str):
     """
@@ -72,7 +79,7 @@ def _run_guardrails(route: str, query: str):
 
 
 @router.post("/query", summary="Run unified AI query")
-async def query_endpoint(req: QueryRequest):
+def query_endpoint(req: QueryRequest):
     """
     Execute the unified AI orchestrator.
 
@@ -114,7 +121,7 @@ async def query_endpoint(req: QueryRequest):
 
 
 @router.post("/rag", summary="Run Retrieval-Augmented Generation (RAG)")
-async def rag_endpoint(req: RAGRequest):
+def rag_endpoint(req: RAGRequest):
     """
     Execute the RAG pipeline.
 
@@ -160,7 +167,7 @@ async def rag_endpoint(req: RAGRequest):
 
 
 @router.post("/analytics", summary="Run fraud analytics query")
-async def analytics_endpoint(req: AnalyticsRequest):
+def analytics_endpoint(req: AnalyticsRequest):
     """
     Execute fraud analytics logic.
 

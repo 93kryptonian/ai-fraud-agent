@@ -89,15 +89,18 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(router)
 
     @app.get("/health", tags=["system"])
-    def health_check():
+    async def health_check():
         """
         Lightweight health check endpoint.
         Used for uptime monitoring and deployment validation.
+
+        `async def` on purpose: it does no blocking work, so it is served on the
+        event loop and never queues behind request work in the worker threadpool.
         """
         return {"status": "ok"}
 
     @app.get("/", tags=["system"])
-    def root():
+    async def root():
         """
         Service metadata endpoint.
         Useful for quick manual verification.
