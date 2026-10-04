@@ -79,6 +79,24 @@ FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "gpt-4o-mini")
 MAX_RETRIES = 4
 MAX_TOKENS = 2048
 
+# Per-attempt deadline for one LLM request. Without it the OpenAI SDK default
+# applies (a 600 s read timeout), and because API requests occupy a worker
+# thread for the whole call, one hung upstream could pin a thread for minutes.
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
+# Linear backoff between attempts: sleep(RETRY_BACKOFF_SECONDS * attempt).
+RETRY_BACKOFF_SECONDS = 1.2
+
+
+def llm_call_worst_case_seconds() -> float:
+    """
+    Upper bound on how long ONE LLM request (a single LLMClient.run) can occupy
+    a worker thread:
+    every attempt hits its deadline, with backoff between attempts (none after
+    the last). The SDK's own retries are disabled, so this is the whole bound.
+    """
+    backoff = RETRY_BACKOFF_SECONDS * sum(range(1, MAX_RETRIES))
+    return MAX_RETRIES * LLM_TIMEOUT_SECONDS + backoff
+
 MAX_COST_USD = float(os.getenv("MAX_COST_USD", "0.10"))
 
 # Session-scoped soft budget (intentionally global)
@@ -131,7 +149,12 @@ def get_openai_client():
     with _CLIENT_LOCK:
         if _openai_client is None:  # another thread may have created it first
             from openai import OpenAI  # local import → CI safe
-            _openai_client = OpenAI(api_key=OPENAI_API_KEY)
+            # max_retries=0: LLMClient.run() is the single retry policy. The
+            # SDK default (2 hidden retries) would multiply the worst case and
+            # make retry_count in the events under-report what really happened.
+            _openai_client = OpenAI(
+                api_key=OPENAI_API_KEY, timeout=LLM_TIMEOUT_SECONDS, max_retries=0
+            )
         return _openai_client
 
 # =============================================================================
@@ -374,7 +397,8 @@ class LLMClient:
                     logger.warning(
                         f"[llm] Error attempt={attempt}/{MAX_RETRIES}: {e}"
                     )
-                    time.sleep(1.2 * attempt)
+                    if attempt < MAX_RETRIES:  # no point sleeping before giving up
+                        time.sleep(RETRY_BACKOFF_SECONDS * attempt)
 
             emit_event(
                 "llm.failed", step="llm", status="failure",

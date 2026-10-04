@@ -34,6 +34,10 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
 SQL_TIMEOUT_MS = int(os.getenv("SQL_TIMEOUT_MS", "15000"))
+# HTTP deadline for PostgREST calls (the vector-search RPC). The client default
+# is 120 s. The direct Postgres path is already bounded (connect_timeout=10,
+# statement_timeout=SQL_TIMEOUT_MS).
+SUPABASE_TIMEOUT_SECONDS = float(os.getenv("SUPABASE_TIMEOUT_SECONDS", "15"))
 
 # =============================================================================
 # LAZY SUPABASE CLIENT (SINGLETON)
@@ -41,6 +45,15 @@ SQL_TIMEOUT_MS = int(os.getenv("SQL_TIMEOUT_MS", "15000"))
 
 _supabase_client: Optional[Client] = None
 _CLIENT_LOCK = threading.Lock()
+
+
+def _client_options():
+    """Client options carrying the HTTP deadline (the class name differs by version)."""
+    try:
+        from supabase.lib.client_options import SyncClientOptions as Options  # newer releases
+    except ImportError:
+        from supabase.lib.client_options import ClientOptions as Options  # pinned release
+    return Options(postgrest_client_timeout=SUPABASE_TIMEOUT_SECONDS)
 
 
 def get_supabase() -> Client:
@@ -69,6 +82,7 @@ def get_supabase() -> Client:
             _supabase_client = create_client(
                 SUPABASE_URL,
                 SUPABASE_ANON_KEY,
+                options=_client_options(),
             )
         return _supabase_client
 

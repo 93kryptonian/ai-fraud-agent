@@ -31,6 +31,12 @@ EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1536"))
 # Stable dummy dimension (used when embeddings are disabled or fail)
 DUMMY_VECTOR_DIM = EMBEDDING_DIM
 
+# Per-attempt deadline for an embedding request (the SDK default is 600 s). The
+# SDK's own 2 retries are kept here (embedding failures degrade to a dummy
+# vector rather than failing the request), so the worst case is roughly
+# 3 x EMBEDDING_TIMEOUT_SECONDS plus the SDK's short backoff.
+EMBEDDING_TIMEOUT_SECONDS = float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "10"))
+
 # =============================================================================
 # LAZY OPENAI CLIENT
 # =============================================================================
@@ -60,7 +66,7 @@ def _get_openai_client():
     with _CLIENT_LOCK:
         if _openai_client is None:  # another thread may have created it first
             from openai import OpenAI  # local import → CI safe
-            _openai_client = OpenAI(api_key=api_key)
+            _openai_client = OpenAI(api_key=api_key, timeout=EMBEDDING_TIMEOUT_SECONDS)
         return _openai_client
 
 # =============================================================================
