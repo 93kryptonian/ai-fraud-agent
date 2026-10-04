@@ -13,7 +13,7 @@ drop table if exists document_embeddings cascade;
 create table document_embeddings (
     id uuid primary key,
     document_id uuid not null references documents(id) on delete cascade,
-    embedding vector(768) not null,
+    embedding vector(1536) not null,
     created_at timestamptz default now()
 );
 
@@ -24,7 +24,7 @@ create index documents_page_idx on documents(page);
 
 create or replace function match_documents(
   filter jsonb,
-  query_embedding vector(768)
+  query_embedding vector(1536)
 )
 returns table (
   id uuid,
@@ -52,3 +52,23 @@ begin
   limit 50;  -- LangChain will trim top_k itself
 end;
 $$;
+
+-- ---------------------------------------------------------------------------
+-- Row-level security
+-- ---------------------------------------------------------------------------
+-- The API queries match_documents() with the ANON key, and the function runs
+-- as the caller, so RLS applies. Without a policy for anon the query silently
+-- returns zero rows (an "empty" retrieval, not an error). Writes (ingestion)
+-- use the service role.
+alter table documents enable row level security;
+alter table document_embeddings enable row level security;
+
+create policy "service_role_all_access_documents"
+  on public.documents for all to service_role using (true) with check (true);
+create policy "service_role_all_access_document_embeddings"
+  on public.document_embeddings for all to service_role using (true) with check (true);
+
+create policy "anon_read_documents"
+  on public.documents for select to anon using (true);
+create policy "anon_read_document_embeddings"
+  on public.document_embeddings for select to anon using (true);

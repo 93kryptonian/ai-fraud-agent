@@ -25,7 +25,7 @@ EMBEDDINGS_ENABLED = os.getenv("EMBEDDINGS_ENABLED", "true").lower() == "true"
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
 # Must match the pgvector column size in infra/supabase_schema.sql
-EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "768"))
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1536"))
 
 # Stable dummy dimension (used when embeddings are disabled or fail)
 DUMMY_VECTOR_DIM = EMBEDDING_DIM
