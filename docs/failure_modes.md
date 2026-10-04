@@ -254,3 +254,80 @@ This system is designed so that:
 - Users are informed, not misled
 
 Failure handling is **intentional**, not incidental.
+
+---
+
+## 9. Failure containment contract
+
+**The defect this section exists for.** The `/query`, `/rag` and `/analytics`
+handlers were `async def` but called blocking code (LLM calls, retry backoff,
+PostgREST, psycopg2). A blocking call inside an `async def` handler runs ON the
+event loop, so one slow request froze every other request on the worker,
+including `/health`. A request the guardrail *rejects* could do it, because
+language detection can make an LLM call before the injection check, and a hung
+upstream could hold the loop for as long as the client library allowed (the
+OpenAI SDK default read timeout is 600 s).
+
+**The contract.**
+
+1. **Liveness isolation.** `/health` and `/` are `async def` and do no blocking
+   work, so they are served on the event loop and never wait behind request work.
+2. **No blocking work on the event loop.** API handlers are plain `def`; FastAPI
+   runs them in its worker threadpool (anyio default: 40 threads).
+3. **Every external call has an explicit deadline** (table below), so a hung
+   upstream occupies a worker thread for a bounded time.
+4. **One retry policy.** `LLMClient.run` is the only retry loop for LLM calls:
+   the SDK's own retries are disabled, so the worst case is knowable and
+   `retry_count` in the telemetry reports what actually happened. There is no
+   backoff sleep after the final attempt.
+5. **Shared state is guarded under concurrency.** The process-wide cost total,
+   the "warn once per unpriced model" set and the lazy client singletons are
+   protected, because running requests in threads made them genuinely concurrent.
+   Per-request context (request id, cost) stays isolated because each request
+   runs in its own copied context.
+
+| Knob | Default | Bounds |
+|---|---|---|
+| `LLM_TIMEOUT_SECONDS` | `30` | one LLM attempt (SDK default was 600 s) |
+| `EMBEDDING_TIMEOUT_SECONDS` | `10` | one embedding attempt; the SDK's 2 retries are kept, since a failed embedding degrades to a dummy vector |
+| `SUPABASE_TIMEOUT_SECONDS` | `15` | one PostgREST call (client default was 120 s) |
+| `SQL_TIMEOUT_MS` | `15000` | one analytics statement (unchanged); the connection attempt is bounded at 10 s |
+
+Worst case for one LLM request (`llm_call_worst_case_seconds()`): 4 attempts x
+30 s + 1.2 x (1 + 2 + 3) s of backoff = **127.2 s** at the defaults. A request
+makes several such calls in the worst case, so the client can still wait a long
+time when an upstream is hung. The deadlines bound the occupancy of a worker
+thread; they do not shorten what the client sees.
+
+**Measured** with `scripts/containment_probe.py` (local, one worker, no API key,
+so the LLM call fails and backs off; the same probe before and after):
+
+| Scenario | Before | After |
+|---|---|---|
+| 4 slow requests at once (wall time) | 49.0 s, serialized | 7.5 s |
+| `/health` while they ran | timed out at 30 s | median 3 ms, max 5 ms |
+| a fast request while they ran | waited 18.2 s | median 3 ms, max 4 ms |
+| 20 slow requests at once (wall time) | not measured | 7.5 s; `/health` max 9 ms |
+| `/health` during a hung upstream (30 s) | 5 of 5 probes timed out | 30 of 30 answered, max 56 ms |
+| the hung request itself | not finished after 30 s (SDK default 600 s) | ended after 19.6 s with `LLM_TIMEOUT_SECONDS=3` (computed bound 19.2 s), logged as `APITimeoutError`, `retry_count=3` |
+
+The no-key failure path went from 12 s to 7.2 s because the trailing backoff
+sleep after the last attempt was removed.
+
+**Reproduced vs inferred.** The stall, the hung-upstream freeze and the deadline
+were all reproduced against a real server. Only the no-key and tarpit cases were
+run: a *real* provider timeout, and a real LLM call's normal duration, were not
+measured. The 600 s and 120 s library defaults are from the libraries'
+documented values (observed here only for the first 30 s).
+
+**Known limits, deliberately not addressed here.**
+- *Threadpool saturation.* With 60 concurrent slow requests the 40-thread pool
+  saturates: wall time doubled to 14.9 s (two waves), `/health` still answered
+  in 5 ms, but a fast request waited up to 6.9 s for a free thread. A concurrency
+  cap or load shedding (`503` + `Retry-After`) is a separate design decision.
+- *No per-request deadline.* A request waits for its upstream calls' own
+  deadlines; it is not cancelled at a total budget.
+- *Guardrail ordering is unchanged.* A keyword-less rejected input still makes an
+  LLM call first. It can no longer freeze the service, but it still costs a call
+  and a worker thread.
+- *Single worker, single process,* as elsewhere in this project.

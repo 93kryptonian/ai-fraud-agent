@@ -129,3 +129,19 @@ Things to know before relying on them:
 
 Details, the metric inventory and the privacy rules are in
 [observability-contract.md](observability-contract.md) (sections 13-15).
+
+## Failure Containment (capacity knobs)
+
+API requests run in worker threads and every external call has a deadline; the
+contract and the measurements are in `docs/failure_modes.md` (section 9).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LLM_TIMEOUT_SECONDS` | `30` | deadline for one LLM attempt |
+| `EMBEDDING_TIMEOUT_SECONDS` | `10` | deadline for one embedding attempt |
+| `SUPABASE_TIMEOUT_SECONDS` | `15` | deadline for one PostgREST call |
+| `SQL_TIMEOUT_MS` | `15000` | statement timeout for analytics SQL |
+
+To check a deployment: `/health` should answer in milliseconds regardless of
+load. To reproduce the stall and the deadline locally, use
+`scripts/containment_probe.py` (usage in its header; no credentials needed).
