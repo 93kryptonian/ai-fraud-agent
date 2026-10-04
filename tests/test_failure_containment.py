@@ -354,8 +354,13 @@ def test_lazy_clients_are_created_once_even_when_threads_race(monkeypatch):
 # =============================================================================
 
 def test_api_handlers_run_in_the_threadpool_and_health_on_the_event_loop():
+    from api.routers import router
+
     app = _app()
-    endpoints = {r.path: r.endpoint for r in app.routes if hasattr(r, "endpoint")}
+    # Newer FastAPI nests included routers inside app.routes, so read the API
+    # routes from the router itself and the system routes from the app.
+    endpoints = {r.path: r.endpoint for r in router.routes if hasattr(r, "endpoint")}
+    endpoints.update({r.path: r.endpoint for r in app.routes if hasattr(r, "endpoint")})
 
     for path in ("/query", "/rag", "/analytics"):
         assert not inspect.iscoroutinefunction(endpoints[path]), (
