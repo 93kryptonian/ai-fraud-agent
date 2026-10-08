@@ -31,3 +31,18 @@ services:
         value: "1536"
       - key: RETRIEVER_ENABLED
         value: "true"
+
+  # Live demo UI: a thin client of the API above. It needs only API_URL and
+  # holds no provider or database credentials.
+  - type: web
+    name: ai-fraud-agent-ui
+    runtime: python
+    plan: free
+    rootDir: live_ui
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: API_URL
+        value: https://ai-fraud-agent.onrender.com
