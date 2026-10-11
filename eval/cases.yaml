@@ -3,7 +3,8 @@
 #   category   analytics | rag | reject | ambiguous | compound
 #   decision   which layer is expected to decide the route:
 #                heuristic  keyword rules in the orchestrator (checkable offline)
-#                guardrail  the input guardrails reject it (checkable offline)
+#                guardrail  the input guardrails reject it (checkable offline); includes the
+#                           out-of-domain check
 #                llm        needs the LLM classifier (live run only)
 #   language   language of the question, and of the expected answer
 #   scored     false = reported but not counted in pass/fail (known limitation)
@@ -176,7 +177,7 @@
   text: "What is the best recipe for chocolate cake?"
   language: en
   category: reject
-  decision: llm
+  decision: guardrail
   expected_route: reject
   expected_behavior: refusal
 
@@ -184,7 +185,7 @@
   text: "How to detect crypto rug pulls?"
   language: en
   category: reject
-  decision: llm
+  decision: guardrail
   expected_route: reject
   expected_behavior: refusal
 
