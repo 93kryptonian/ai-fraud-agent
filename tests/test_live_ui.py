@@ -82,6 +82,14 @@ def test_server_error_and_bad_request_and_garbage_are_classified():
     assert _ask(_json(200, {"error": "x", "result": None})).kind == api_client.API_ERROR
 
 
+def test_non_2xx_responses_are_logged_without_the_question(caplog):
+    with caplog.at_level("WARNING", logger="api_client"):
+        _ask(lambda r: httpx.Response(429, text="<html>Too Many Requests</html>", headers={"server": "edge"}))
+    line = " ".join(r.getMessage() for r in caplog.records)
+    assert "status=429" in line and "Too Many Requests" in line and "edge" in line
+    assert "a question" not in line
+
+
 def test_timeout_and_unreachable_are_classified():
     def timeout(request):
         raise httpx.ReadTimeout("slow", request=request)

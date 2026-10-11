@@ -9,11 +9,14 @@ API's own packages and holds no provider credentials.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 # A cold free-tier API can take about 45 s to wake, then the request itself runs.
 DEFAULT_TIMEOUT_SECONDS = 90.0
@@ -115,6 +118,19 @@ def ask(
         return Outcome(UNREACHABLE, elapsed(), message="Could not reach the API.")
 
     status = response.status_code
+
+    if status >= 400:
+        # Say what actually came back, so a 429 from the API's limiter can be told
+        # apart from one sent by the platform in front of it. Status, headers and
+        # a short body prefix only: never the question.
+        logger.warning(
+            "api_non_2xx status=%s content_type=%s retry_after=%s server=%s body=%r",
+            status,
+            response.headers.get("content-type"),
+            response.headers.get("retry-after"),
+            response.headers.get("server"),
+            response.text[:200],
+        )
 
     if status == 429:
         retry = None
