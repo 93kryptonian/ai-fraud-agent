@@ -25,6 +25,7 @@ EXAMPLES = [
     "Which merchants have the highest fraud incidence?",
     "What is the monthly fraud trend?",
     "What are the main fraud typologies described in the documents?",
+    "Which merchants have the highest fraud incidence, and why does card-not-present fraud occur?",
 ]
 
 st.set_page_config(page_title="Fraud intelligence live demo", layout="centered")
@@ -68,25 +69,41 @@ def _squash(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+def _sql_evidence(outcome: client.Outcome, timing: bool = True) -> None:
+    with st.container(border=True):
+        if outcome.sql:
+            st.markdown("**The query that produced the numbers**")
+            st.code(outcome.sql, language="sql")
+            note = f"{len(outcome.rows)} rows returned"
+            if timing:
+                note += f" · answered in {outcome.elapsed_seconds:.1f} s, measured from this page"
+            st.markdown(f'<p class="evidence-note">{note}</p>', unsafe_allow_html=True)
+            if outcome.rows:
+                st.dataframe(outcome.rows, use_container_width=True, hide_index=True)
+        else:
+            st.markdown("**No SQL was run for this answer**, so there is no query to check it against.")
+
+
+def _passages_evidence(outcome: client.Outcome) -> None:
+    with st.container(border=True):
+        if outcome.citations:
+            st.markdown("**Passages the explanation was built from**")
+            for c in outcome.citations:
+                if not isinstance(c, dict):
+                    continue
+                st.markdown(f"{_plain(str(c.get('source', 'Unknown source')))}, page {c.get('page', '?')}")
+                st.caption(_squash(str(c.get("preview", "")))[:280])
+        else:
+            st.markdown("**No passages were cited** for this answer.")
+
+
 def render_outcome(outcome: client.Outcome) -> None:
     kind = outcome.kind
 
     if kind == client.ANALYTICS:
         if outcome.answer:
             st.markdown(f'<div class="answer">\n\n{_plain(outcome.answer)}\n\n</div>', unsafe_allow_html=True)
-        with st.container(border=True):
-            if outcome.sql:
-                st.markdown("**The query that produced this answer**")
-                st.code(outcome.sql, language="sql")
-                st.markdown(
-                    f'<p class="evidence-note">{len(outcome.rows)} rows returned · answered in '
-                    f"{outcome.elapsed_seconds:.1f} s, measured from this page</p>",
-                    unsafe_allow_html=True,
-                )
-                if outcome.rows:
-                    st.dataframe(outcome.rows, use_container_width=True, hide_index=True)
-            else:
-                st.markdown("**No SQL was run for this answer**, so there is no query to check it against.")
+        _sql_evidence(outcome)
         if outcome.confidence is not None:
             st.caption(f"Confidence reported by the API: {outcome.confidence:.2f}")
         return
@@ -96,19 +113,22 @@ def render_outcome(outcome: client.Outcome) -> None:
             st.markdown(f'<div class="answer">\n\n{_plain(outcome.answer)}\n\n</div>', unsafe_allow_html=True)
         if outcome.message:
             st.warning(outcome.message)
-        with st.container(border=True):
-            if outcome.citations:
-                st.markdown("**Passages this answer was built from**")
-                for c in outcome.citations:
-                    if not isinstance(c, dict):
-                        continue
-                    st.markdown(f"{_plain(str(c.get('source', 'Unknown source')))}, page {c.get('page', '?')}")
-                    st.caption(_squash(str(c.get("preview", "")))[:280])
-            else:
-                st.markdown("**No passages were cited** for this answer.")
+        _passages_evidence(outcome)
         st.caption(f"Answered in {outcome.elapsed_seconds:.1f} s, measured from this page")
         if outcome.confidence is not None:
             st.caption(f"Confidence reported by the API: {outcome.confidence:.2f}")
+        return
+
+    if kind == client.HYBRID:
+        if outcome.answer:
+            st.markdown(f'<div class="answer">\n\n{_plain(outcome.answer)}\n\n</div>', unsafe_allow_html=True)
+        if outcome.parts.get("analytics") in {"failed", "no_data"}:
+            st.warning("The transaction data could not answer the numbers part of this question.")
+        if outcome.parts.get("rag") in {"failed", "degraded"}:
+            st.warning("The documents did not have enough to explain this, so the explanation part is incomplete.")
+        _sql_evidence(outcome, timing=False)
+        _passages_evidence(outcome)
+        st.caption(f"Answered in {outcome.elapsed_seconds:.1f} s, measured from this page. Two sources were used, one after the other.")
         return
 
     if kind == client.REJECTED:

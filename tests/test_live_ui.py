@@ -190,3 +190,50 @@ def test_page_explains_each_failure(monkeypatch, kind, expected):
     at = _run_page(monkeypatch, out)
     shown = " ".join([e.value for e in at.error] + [w.value for w in at.warning])
     assert expected in shown
+
+
+# ---- the hybrid response ----------------------------------------------------
+
+HYBRID_BODY = {
+    "query": "q", "intent": "hybrid", "error": None,
+    "result": {
+        "type": "hybrid",
+        "answer": "fraud_A has the highest fraud incidence.\n\nWhat the documents say: card-not-present exposure.",
+        "analytics": {"answer": "x", "sql": "SELECT 1", "data_points": [{"m": "A"}], "confidence": 0.7},
+        "rag": {"answer": "y", "citations": [{"source": "Bhatla", "page": 5, "preview": "p"}], "retrieval_status": "ok"},
+        "parts": {"analytics": "ok", "rag": "ok"},
+    },
+}
+
+
+def test_a_hybrid_answer_carries_both_kinds_of_evidence_and_its_parts():
+    out = _ask(_json(200, HYBRID_BODY))
+    assert out.kind == api_client.HYBRID
+    assert out.sql == "SELECT 1" and out.rows == [{"m": "A"}] and out.citations[0]["source"] == "Bhatla"
+    assert out.parts == {"analytics": "ok", "rag": "ok"} and "What the documents say" in out.answer
+
+
+def test_a_hybrid_answer_with_one_half_missing_still_parses():
+    body = json.loads(json.dumps(HYBRID_BODY))
+    body["result"]["rag"] = None
+    body["result"]["parts"]["rag"] = "failed"
+    out = _ask(_json(200, body))
+    assert out.kind == api_client.HYBRID and out.citations == [] and out.parts["rag"] == "failed"
+
+
+def test_page_shows_the_sql_and_the_passages_for_a_hybrid_answer(monkeypatch):
+    out = api_client.Outcome(api_client.HYBRID, 4.0, answer="Numbers.\n\nWhat the documents say: why.", sql="SELECT 1",
+                             rows=[{"m": "A"}], citations=[{"source": "Bhatla", "page": 5, "preview": "p"}],
+                             parts={"analytics": "ok", "rag": "ok"})
+    at = _run_page(monkeypatch, out)
+    assert any(c.value == "SELECT 1" for c in at.code)
+    assert any("Bhatla, page 5" in m.value for m in at.markdown)
+    assert not at.warning
+
+
+def test_page_says_when_the_document_half_could_not_explain(monkeypatch):
+    out = api_client.Outcome(api_client.HYBRID, 4.0, answer="Numbers.", sql="SELECT 1", rows=[{"m": "A"}],
+                             parts={"analytics": "ok", "rag": "degraded"})
+    at = _run_page(monkeypatch, out)
+    assert any("did not have enough to explain" in w.value for w in at.warning)
+    assert any(c.value == "SELECT 1" for c in at.code)          # the numbers are still shown with their SQL

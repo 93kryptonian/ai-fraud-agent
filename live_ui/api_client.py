@@ -23,6 +23,7 @@ DEFAULT_TIMEOUT_SECONDS = 90.0
 
 ANALYTICS = "analytics"
 RAG = "rag"
+HYBRID = "hybrid"
 REJECTED = "rejected"
 RATE_LIMITED = "rate_limited"
 TIMEOUT = "timeout"
@@ -43,6 +44,7 @@ class Outcome:
     message: str = ""
     retry_after_seconds: Optional[int] = None
     status_code: Optional[int] = None
+    parts: dict = field(default_factory=dict)
 
 
 def _number(value: Any) -> Optional[float]:
@@ -76,6 +78,23 @@ def _parse_success(body: Any, elapsed: float) -> Outcome:
             sql=analytics.get("sql") or None,
             rows=rows if isinstance(rows, list) else [],
             confidence=_number(analytics.get("confidence")),
+        )
+
+    if kind == "hybrid":
+        analytics = result.get("analytics") if isinstance(result.get("analytics"), dict) else {}
+        rag = result.get("rag") if isinstance(result.get("rag"), dict) else {}
+        rows = analytics.get("data_points")
+        citations = rag.get("citations")
+        parts = result.get("parts") if isinstance(result.get("parts"), dict) else {}
+        return Outcome(
+            HYBRID,
+            elapsed,
+            answer=str(result.get("answer") or ""),
+            sql=analytics.get("sql") or None,
+            rows=rows if isinstance(rows, list) else [],
+            citations=citations if isinstance(citations, list) else [],
+            confidence=_number(analytics.get("confidence")),
+            parts={str(k): str(v) for k, v in parts.items()},
         )
 
     if kind == "rag":
