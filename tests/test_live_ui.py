@@ -1,0 +1,192 @@
+"""
+Live demo UI (live_ui/): a thin client of the API.
+
+The UI must stay a thin client: one setting (the API URL), no provider or
+database credentials, no imports from the API's own packages, and model text
+never rendered as HTML.
+"""
+
+import ast
+import json
+import re
+import sys
+from pathlib import Path
+
+import httpx
+import pytest
+
+LIVE_UI = Path(__file__).resolve().parent.parent / "live_ui"
+sys.path.insert(0, str(LIVE_UI))
+
+import api_client  # noqa: E402
+
+
+def _ask(handler, **kw):
+    return api_client.ask("https://api.example.test/", "a question", transport=httpx.MockTransport(handler), **kw)
+
+
+def _json(status, body, headers=None):
+    return lambda request: httpx.Response(status, json=body, headers=headers)
+
+
+# ---- Parsing the API's real response shapes ------------------------------
+
+def test_analytics_answer_carries_the_sql_and_rows():
+    body = {"query": "q", "intent": "analytics", "error": None, "result": {
+        "type": "analytics",
+        "analytics": {"answer": "A leads.", "sql": "SELECT 1", "data_points": [{"merchant": "A"}], "confidence": 0.73, "chart_data": []},
+    }}
+    out = _ask(_json(200, body))
+    assert out.kind == api_client.ANALYTICS
+    assert (out.answer, out.sql, out.rows, out.confidence) == ("A leads.", "SELECT 1", [{"merchant": "A"}], 0.73)
+
+
+def test_analytics_without_sql_is_visible_as_having_no_sql():
+    body = {"error": None, "result": {"type": "analytics", "analytics": {"answer": "x", "sql": None, "data_points": []}}}
+    out = _ask(_json(200, body))
+    assert out.kind == api_client.ANALYTICS and out.sql is None
+
+
+def test_rag_answer_carries_citations_and_flags_degraded_retrieval():
+    body = {"error": None, "result": {
+        "type": "rag", "answer": "Text.", "retrieval_status": "ok",
+        "citations": [{"source": "Bhatla", "page": 5, "preview": "p"}], "score": {"final_score": 0.5},
+    }}
+    out = _ask(_json(200, body))
+    assert out.kind == api_client.RAG and out.citations[0]["source"] == "Bhatla" and out.message == ""
+    body["result"]["retrieval_status"] = "unavailable"
+    assert _ask(_json(200, body)).message  # the page tells the reader
+
+
+def test_guardrail_rejection_is_not_an_error():
+    body = {"error": None, "intent": "reject", "result": {"type": "reject", "message": "Potential prompt-injection attempt detected."}}
+    out = _ask(_json(200, body))
+    assert out.kind == api_client.REJECTED and "prompt-injection" in out.message
+
+
+# ---- Failure modes: every one is classified, none raises -----------------
+
+def test_rate_limit_reads_retry_after_header_then_body():
+    out = _ask(_json(429, {"error": "Rate limit exceeded.", "retry_after_seconds": 12}, {"Retry-After": "7"}))
+    assert (out.kind, out.retry_after_seconds) == (api_client.RATE_LIMITED, 7)
+    out = _ask(_json(429, {"retry_after_seconds": 12}))
+    assert out.retry_after_seconds == 12
+
+
+def test_server_error_and_bad_request_and_garbage_are_classified():
+    assert _ask(_json(500, {"detail": "boom"})).kind == api_client.API_ERROR
+    assert _ask(_json(400, {"error": "no"})).kind == api_client.REJECTED
+    assert _ask(lambda r: httpx.Response(200, text="<html>")).kind == api_client.UNEXPECTED
+    assert _ask(_json(200, ["not", "a", "dict"])).kind == api_client.UNEXPECTED
+    assert _ask(_json(200, {"result": {"type": "something-new"}})).kind == api_client.UNEXPECTED
+    assert _ask(_json(200, {"error": "x", "result": None})).kind == api_client.API_ERROR
+
+
+def test_non_2xx_responses_are_logged_without_the_question(caplog):
+    with caplog.at_level("WARNING", logger="api_client"):
+        _ask(lambda r: httpx.Response(429, text="<html>Too Many Requests</html>", headers={"server": "edge"}))
+    line = " ".join(r.getMessage() for r in caplog.records)
+    assert "status=429" in line and "Too Many Requests" in line and "edge" in line
+    assert "a question" not in line
+
+
+def test_timeout_and_unreachable_are_classified():
+    def timeout(request):
+        raise httpx.ReadTimeout("slow", request=request)
+
+    def refused(request):
+        raise httpx.ConnectError("down", request=request)
+
+    assert _ask(timeout).kind == api_client.TIMEOUT
+    assert _ask(refused).kind == api_client.UNREACHABLE
+
+
+def test_it_posts_the_question_to_query_without_credentials():
+    seen = {}
+
+    def handler(request):
+        seen["url"], seen["body"], seen["headers"] = str(request.url), json.loads(request.content), dict(request.headers)
+        return httpx.Response(200, json={"result": {"type": "reject", "message": "m"}})
+
+    _ask(handler)
+    assert seen["url"] == "https://api.example.test/query"
+    assert seen["body"] == {"query": "a question"}
+    assert "authorization" not in seen["headers"]
+
+
+# ---- It stays a thin client ----------------------------------------------
+
+def _imports(path):
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            yield from (a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            yield node.module or ""
+
+
+@pytest.mark.parametrize("name", ["app.py", "api_client.py"])
+def test_live_ui_imports_nothing_from_the_api_packages(name):
+    banned = {"src", "api", "supabase", "openai", "psycopg2"}
+    found = {m.split(".")[0] for m in _imports(LIVE_UI / name)}
+    assert not (found & banned), f"{name} imports {found & banned}"
+
+
+def test_live_ui_reads_no_secrets():
+    text = "".join((LIVE_UI / n).read_text() for n in ("app.py", "api_client.py"))
+    for secret in ("OPENAI_API_KEY", "SUPABASE", "SIGNALS_TOKEN", "DATABASE_URL"):
+        assert secret not in text
+    assert set(re.findall(r'environ(?:\.get)?\(\s*"(\w+)"', text)) == {"API_URL"}
+
+
+def test_live_ui_requirements_exclude_provider_libraries():
+    reqs = (LIVE_UI / "requirements.txt").read_text().lower()
+    for lib in ("openai", "supabase", "psycopg2", "fastapi"):
+        assert lib not in reqs
+
+
+def test_model_text_is_never_rendered_as_html():
+    """unsafe_allow_html is allowed only for static strings and the answer wrapper div, never a model string."""
+    tree = ast.parse((LIVE_UI / "app.py").read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and any(k.arg == "unsafe_allow_html" for k in node.keywords):
+            arg = node.args[0]
+            if isinstance(arg, ast.JoinedStr):  # f-string: only the answer wrapper and the numeric note may interpolate
+                src = ast.unparse(arg)
+                assert "outcome.answer" not in src.replace("_plain(outcome.answer)", ""), src
+                assert "citation" not in src and "sql" not in src.replace("outcome.rows", ""), src
+
+
+# ---- The page runs and renders each state --------------------------------
+
+def _run_page(monkeypatch, outcome):
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setattr(api_client, "ask", lambda *a, **k: outcome)
+    at = AppTest.from_file(str(LIVE_UI / "app.py"), default_timeout=20)
+    at.run()
+    assert not at.exception
+    at.text_area[0].set_value("which merchants?").run()
+    at.button[-1].click().run()  # the Ask submit button
+    assert not at.exception
+    return at
+
+
+def test_page_renders_the_sql_for_an_analytics_answer(monkeypatch):
+    out = api_client.Outcome(api_client.ANALYTICS, 1.2, answer="A leads with $5.", sql="SELECT 1", rows=[{"m": "A"}])
+    at = _run_page(monkeypatch, out)
+    assert any(c.value == "SELECT 1" for c in at.code)
+    assert any("A leads with \\$5." in m.value for m in at.markdown)
+
+
+@pytest.mark.parametrize("kind,expected", [
+    (api_client.RATE_LIMITED, "Try again in 9 seconds"),
+    (api_client.TIMEOUT, "waking up"),
+    (api_client.UNREACHABLE, "Could not reach the API"),
+    (api_client.API_ERROR, "failed while answering"),
+])
+def test_page_explains_each_failure(monkeypatch, kind, expected):
+    out = api_client.Outcome(kind, 0.1, message="m", retry_after_seconds=9)
+    at = _run_page(monkeypatch, out)
+    shown = " ".join([e.value for e in at.error] + [w.value for w in at.warning])
+    assert expected in shown
