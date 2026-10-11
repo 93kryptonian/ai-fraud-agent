@@ -154,3 +154,44 @@ def test_single_path_questions_still_run_one_pipeline(stubs, monkeypatch):
     monkeypatch.setattr(orch, "_run_rag_branch", lambda q, lang: called.append("rag") or {"intent": "rag"})
     orch.run_query("Which merchants have the highest fraud incidence?")
     assert called == []                                                      # analytics only: RAG was not run
+
+
+# ---- what the document half is asked --------------------------------------
+
+@pytest.mark.parametrize("query,expected", [
+    ("Which merchants have the highest fraud incidence, and why does card-not-present fraud occur?",
+     "why does card-not-present fraud occur?"),
+    (COMPOUND, "what might explain the pattern?"),
+    ("Which merchants have the highest fraud; explain how card-not-present fraud works?",
+     "explain how card-not-present fraud works?"),
+])
+def test_the_document_half_is_asked_the_explanation_clause_when_it_can_stand_alone(query, expected):
+    assert orch.explanation_clause(query) == expected
+
+
+@pytest.mark.parametrize("query", [
+    "Merchant mana yang memiliki fraud tertinggi dan jelaskan penyebabnya?",   # clause too short to stand alone
+    "Which merchants have the highest fraud and why?",
+    "Which merchants have the highest fraud incidence?",                        # no explanation word at all
+])
+def test_otherwise_the_document_half_is_asked_the_whole_question(query):
+    assert orch.explanation_clause(query) == query
+
+
+def test_the_rag_half_really_receives_the_clause_and_the_analytics_half_the_whole_question(stubs, monkeypatch):
+    stubs()
+    asked = {}
+    real_rag, real_analytics = orch.run_rag, orch.run_analytics
+    monkeypatch.setattr(orch, "run_rag", lambda query_en, user_lang: asked.setdefault("rag", query_en) and real_rag(query_en, user_lang))
+    monkeypatch.setattr(orch, "run_analytics", lambda q, lang: asked.setdefault("analytics", q) and real_analytics(q, lang))
+    text = "Which merchants have the highest fraud incidence, and why does card-not-present fraud occur?"
+    orch.run_query(text)
+    assert asked["analytics"] == text
+    assert asked["rag"] == "why does card-not-present fraud occur?"
+
+
+def test_an_indonesian_refusal_from_the_document_half_is_degraded_not_ok(stubs):
+    # the model refuses in the user's language; the scorer must treat that as no evidence (not 0.415)
+    stubs(rag={**RAG, "answer": "Maaf, dokumen yang tersedia tidak memberikan cukup informasi untuk menjawab pertanyaan Anda."},
+          score=0.0)
+    assert orch.run_query(COMPOUND)["result"]["parts"]["rag"] == "degraded"

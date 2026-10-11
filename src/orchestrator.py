@@ -366,6 +366,26 @@ def _rag_part(branch: Dict[str, Any]):
     return rag, "ok" if healthy else "degraded"
 
 
+_CLAUSE_SPLIT_RE = re.compile(r",\s*(?:and|dan)\s+|;\s*|\s+(?:and|dan)\s+", re.I)
+_MIN_CLAUSE_WORDS = 5
+
+
+def explanation_clause(query: str) -> str:
+    """
+    The part of a compound question that asks for the explanation, for the RAG
+    half. Given the whole question, the document model declines when the data
+    half ("which merchants have the highest fraud") is not in the documents,
+    even if the explanation half is. The clause is used only when it can stand
+    alone (at least _MIN_CLAUSE_WORDS words); otherwise the full question is.
+    """
+    match = _EXPLAIN_RE.search(query)
+    if not match:
+        return query
+    starts = [m.end() for m in _CLAUSE_SPLIT_RE.finditer(query, 0, match.start())]
+    clause = query[starts[-1]:].strip() if starts else query
+    return clause if len(clause.split()) >= _MIN_CLAUSE_WORDS else query
+
+
 def _run_hybrid_branch(query: str, user_lang: str) -> Dict[str, Any]:
     """
     A question that needs both jobs: the numbers (analytics, with its SQL) and
@@ -374,7 +394,7 @@ def _run_hybrid_branch(query: str, user_lang: str) -> Dict[str, Any]:
     half fails the answer says so; if both fail the request fails.
     """
     analytics, analytics_status = _analytics_part(_run_analytics_branch(query, user_lang))
-    rag, rag_status = _rag_part(_run_rag_branch(query, user_lang))
+    rag, rag_status = _rag_part(_run_rag_branch(explanation_clause(query), user_lang))
 
     if analytics is None and rag is None:
         return {"query": query, "intent": "hybrid", "result": None, "error": "Hybrid pipeline failed."}

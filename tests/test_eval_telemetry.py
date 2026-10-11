@@ -52,7 +52,9 @@ def test_llm_failures_are_counted():
 
 
 def test_embedding_calls_tokens_and_cost_are_reported_and_unknown_stays_none():
-    done = lambda tokens, cost: {"event": "embedding.completed", "metadata": {"model": "m", "total_tokens": tokens, "estimated_cost_usd": cost}}
+    def done(tokens, cost):
+        return {"event": "embedding.completed", "metadata": {"model": "m", "total_tokens": tokens, "estimated_cost_usd": cost}}
+
     s = summarize([done(10, 2e-7), done(20, 4e-7), {"event": "embedding.failed", "metadata": {"model": "m"}}])
     assert (s["embedding_calls"], s["embedding_failures"], s["embedding_tokens"]) == (3, 1, 30)
     assert s["embedding_cost_usd"] == pytest.approx(6e-7)
