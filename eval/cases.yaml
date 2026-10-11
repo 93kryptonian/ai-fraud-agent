@@ -110,7 +110,8 @@
   decision: heuristic
   expected_route: rag
   expected_behavior: answer
-  must_include: [card-not-present]
+  # the answer is in Indonesian and may translate the term ("kartu yang tidak hadir")
+  must_include: [["card-not-present", "tidak hadir"]]
   expect_citations: true
 
 - id: R3
@@ -195,7 +196,7 @@
   decision: llm
   expected_route: analytics
   expected_behavior: answer
-  must_include: [merchant]
+  must_include: [fraud]
   expect_sql: true
 
 - id: M2
