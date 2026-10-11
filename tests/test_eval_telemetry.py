@@ -1,5 +1,7 @@
 """eval/telemetry.py: the live report reads real telemetry events and never invents a number."""
 
+import pytest
+
 from eval.telemetry import EventCollector, summarize
 from src.observability.events import emit_event
 
@@ -47,3 +49,14 @@ def test_llm_failures_are_counted():
     s = summarize([{"event": "llm.failed", "metadata": {"purpose": "intent_classification"}},
                    {"event": "llm.completed", "metadata": {"purpose": "intent_classification"}}])
     assert s["llm_calls"] == 2 and s["llm_failures"] == 1
+
+
+def test_embedding_calls_tokens_and_cost_are_reported_and_unknown_stays_none():
+    done = lambda tokens, cost: {"event": "embedding.completed", "metadata": {"model": "m", "total_tokens": tokens, "estimated_cost_usd": cost}}
+    s = summarize([done(10, 2e-7), done(20, 4e-7), {"event": "embedding.failed", "metadata": {"model": "m"}}])
+    assert (s["embedding_calls"], s["embedding_failures"], s["embedding_tokens"]) == (3, 1, 30)
+    assert s["embedding_cost_usd"] == pytest.approx(6e-7)
+    unknown = summarize([done(10, 2e-7), done(None, None)])
+    assert unknown["embedding_cost_usd"] is None and unknown["embedding_tokens"] is None
+    none = summarize([])
+    assert (none["embedding_calls"], none["embedding_cost_usd"]) == (0, None)

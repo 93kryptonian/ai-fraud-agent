@@ -45,6 +45,9 @@ def summarize(events: list) -> dict:
     meta = completed.get("metadata") or {}
     intent = ((by_name.get("intent.completed") or [{}])[-1]).get("metadata") or {}
     llm_events = (by_name.get("llm.completed") or []) + (by_name.get("llm.failed") or [])
+    emb_done = by_name.get("embedding.completed") or []
+    emb_costs = [(e.get("metadata") or {}).get("estimated_cost_usd") for e in emb_done]
+    emb_tokens = [(e.get("metadata") or {}).get("total_tokens") for e in emb_done]
 
     return {
         "request_status": completed.get("status"),
@@ -57,4 +60,9 @@ def summarize(events: list) -> dict:
         "llm_purposes": sorted({(e.get("metadata") or {}).get("purpose") for e in llm_events} - {None}),
         "llm_failures": len(by_name.get("llm.failed") or []),
         "guardrail_blocked": bool(by_name.get("guardrails.blocked")),
+        "embedding_calls": len(emb_done) + len(by_name.get("embedding.failed") or []),
+        "embedding_failures": len(by_name.get("embedding.failed") or []),
+        # None when there was no call, or when any call's cost or usage is unknown: never a made-up 0
+        "embedding_tokens": sum(emb_tokens) if emb_done and None not in emb_tokens else None,
+        "embedding_cost_usd": sum(emb_costs) if emb_done and None not in emb_costs else None,
     }
