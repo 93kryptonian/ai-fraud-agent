@@ -331,3 +331,18 @@ documented values (observed here only for the first 30 s).
   LLM call first. It can no longer freeze the service, but it still costs a call
   and a worker thread.
 - *Single worker, single process,* as elsewhere in this project.
+
+---
+
+## 10. Findings from the evaluation (2026-10-11)
+
+Found by running the evaluation set ([evaluation.md](evaluation.md)). Recorded, not fixed.
+
+| Finding | Where | Effect |
+|---|---|---|
+| A scalar or generic analytics result loses its value: the summary is "Analysis processed N rows and M columns." | `summarize_generic` in `src/analytics/fraud_analytics.py` | "How many fraudulent transactions...?" runs correct SQL and returns an answer with no number |
+| Prompt-injection patterns are English only | `FORBIDDEN_PATTERNS` in `src/safety/guardrails.py` | An Indonesian injection passes the guardrails; the LLM intent classifier caught it in the live run, at the cost of an LLM call |
+| Failure of the LLM intent classifier silently becomes `rag` | `detect_intent_llm` in `src/orchestrator.py` | An ambiguous question can be answered by the wrong path with no sign of the failure |
+| A question needing two jobs gets one path | orchestrator routing | A compound question (rank, then explain) is answered only by analytics |
+| Embedding cost is not in the telemetry | `src/embeddings/embedder.py` | Per-request cost covers LLM calls only |
+
