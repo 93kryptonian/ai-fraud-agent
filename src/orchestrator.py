@@ -211,6 +211,114 @@ def detect_intent(
 # MAIN ORCHESTRATION PIPELINE
 # =============================================================================
 
+def _run_analytics_branch(query: str, user_lang: str) -> Dict[str, Any]:
+    """The analytics pipeline for one query (unchanged behavior; extracted so the hybrid route can reuse it)."""
+    try:
+        analytics_res = run_analytics(query, user_lang)
+        return {
+            "query": query,
+            "intent": "analytics",
+            "error": None,
+            "result": {"type": "analytics", "analytics": analytics_res},
+        }
+    except Exception:
+        logger.error("[orchestrator] analytics failed", exc_info=True)
+        return {
+            "query": query,
+            "intent": "analytics",
+            "result": None,
+            "error": "Analytics pipeline failed.",
+        }
+
+
+def _run_rag_branch(query: str, user_lang: str) -> Dict[str, Any]:
+    """The RAG pipeline for one query (unchanged behavior; extracted so the hybrid route can reuse it)."""
+    try:
+        rewritten_query, meta = process_query(query)
+        logger.info(
+            f"[orchestrator] rewritten_query={rewritten_query!r} | meta={meta}"
+        )
+
+        final_query_en = meta["final_query_en"]
+        user_lang = meta.get("lang") or user_lang
+
+        rag_res = run_rag(query_en=final_query_en, user_lang=user_lang)
+
+        answer_en = rag_res.get("answer", "")
+        chunks = rag_res.get("chunks", [])
+        context_text = rag_res.get("context_text", "")
+
+        scoring = score_answer(
+            question=final_query_en,
+            answer=answer_en,
+            chunks=chunks,
+            use_llm=False,
+        )
+
+        final_score = scoring.get("final_score", 0.0)
+        logger.info(f"[orchestrator] RAG score={final_score:.3f}")
+
+        # Low-confidence fallback
+        if final_score < 0.12:
+            if rag_res.get("retrieval_status") == "unavailable":
+                fallback_msg = (
+                    "Maaf, pencarian dokumen sedang tidak tersedia. Coba lagi nanti."
+                    if user_lang == "id"
+                    else "Sorry, the document search is temporarily unavailable. "
+                    "Please try again later."
+                )
+            else:
+                fallback_msg = (
+                    "Maaf, dokumen yang tersedia tidak cukup untuk menjawab pertanyaan."
+                    if user_lang == "id"
+                    else "Sorry, the documents do not contain enough information."
+                )
+
+            rag_res.update(
+                {"answer": fallback_msg, "insight": None, "score": scoring}
+            )
+
+            return {
+                "query": query,
+                "intent": "rag",
+                "error": None,
+                "result": {"type": "rag", **rag_res},
+            }
+
+        insight_en = generate_insight(
+            answer_en, context_text, user_lang="en"
+        )
+
+        if user_lang == "id":
+            answer = translate_en_to_id(answer_en)
+            insight = (
+                translate_en_to_id(insight_en) if insight_en else None
+            )
+        else:
+            answer = answer_en
+            insight = insight_en
+
+        rag_res.update(
+            {"answer": answer, "insight": insight, "score": scoring}
+        )
+
+        return {
+            "query": query,
+            "intent": "rag",
+            "error": None,
+            "result": {"type": "rag", **rag_res},
+        }
+
+    except Exception:
+        logger.error("[orchestrator] RAG pipeline failed", exc_info=True)
+        return {
+            "query": query,
+            "intent": "rag",
+            "result": None,
+            "error": "RAG pipeline failed.",
+        }
+
+
 def run_query(raw_query: str, detected_lang: str = None) -> Dict[str, Any]:
     """
     Main entrypoint for all user queries.
@@ -300,110 +408,9 @@ def run_query(raw_query: str, detected_lang: str = None) -> Dict[str, Any]:
         }
 
     # ------------------------------------------------------------------
-    # 5. Analytics pipeline
+    # 5. Pipelines
     # ------------------------------------------------------------------
     if intent == "analytics":
-        try:
-            analytics_res = run_analytics(query, user_lang)
-            return {
-                "query": query,
-                "intent": "analytics",
-                "error": None,
-                "result": {"type": "analytics", "analytics": analytics_res},
-            }
-        except Exception:
-            logger.error("[orchestrator] analytics failed", exc_info=True)
-            return {
-                "query": query,
-                "intent": "analytics",
-                "result": None,
-                "error": "Analytics pipeline failed.",
-            }
+        return _run_analytics_branch(query, user_lang)
 
-    # ------------------------------------------------------------------
-    # 6. RAG pipeline
-    # ------------------------------------------------------------------
-    try:
-        rewritten_query, meta = process_query(query)
-        logger.info(
-            f"[orchestrator] rewritten_query={rewritten_query!r} | meta={meta}"
-        )
-
-        final_query_en = meta["final_query_en"]
-        user_lang = meta.get("lang") or user_lang
-
-        rag_res = run_rag(query_en=final_query_en, user_lang=user_lang)
-
-        answer_en = rag_res.get("answer", "")
-        chunks = rag_res.get("chunks", [])
-        context_text = rag_res.get("context_text", "")
-
-        scoring = score_answer(
-            question=final_query_en,
-            answer=answer_en,
-            chunks=chunks,
-            use_llm=False,
-        )
-
-        final_score = scoring.get("final_score", 0.0)
-        logger.info(f"[orchestrator] RAG score={final_score:.3f}")
-
-        # Low-confidence fallback
-        if final_score < 0.12:
-            if rag_res.get("retrieval_status") == "unavailable":
-                fallback_msg = (
-                    "Maaf, pencarian dokumen sedang tidak tersedia. Coba lagi nanti."
-                    if user_lang == "id"
-                    else "Sorry, the document search is temporarily unavailable. "
-                    "Please try again later."
-                )
-            else:
-                fallback_msg = (
-                    "Maaf, dokumen yang tersedia tidak cukup untuk menjawab pertanyaan."
-                    if user_lang == "id"
-                    else "Sorry, the documents do not contain enough information."
-                )
-
-            rag_res.update(
-                {"answer": fallback_msg, "insight": None, "score": scoring}
-            )
-
-            return {
-                "query": query,
-                "intent": "rag",
-                "error": None,
-                "result": {"type": "rag", **rag_res},
-            }
-
-        insight_en = generate_insight(
-            answer_en, context_text, user_lang="en"
-        )
-
-        if user_lang == "id":
-            answer = translate_en_to_id(answer_en)
-            insight = (
-                translate_en_to_id(insight_en) if insight_en else None
-            )
-        else:
-            answer = answer_en
-            insight = insight_en
-
-        rag_res.update(
-            {"answer": answer, "insight": insight, "score": scoring}
-        )
-
-        return {
-            "query": query,
-            "intent": "rag",
-            "error": None,
-            "result": {"type": "rag", **rag_res},
-        }
-
-    except Exception:
-        logger.error("[orchestrator] RAG pipeline failed", exc_info=True)
-        return {
-            "query": query,
-            "intent": "rag",
-            "result": None,
-            "error": "RAG pipeline failed.",
-        }
+    return _run_rag_branch(query, user_lang)
