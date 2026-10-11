@@ -385,8 +385,30 @@ def summarize_ranking(df: pd.DataFrame, lang: str) -> Tuple[str, float]:
     return summary, float(min(1.0, max(0.0, confidence)))
 
 
+def _format_value(value: Any) -> str:
+    """A result cell as readable text (thousands separators, bounded float precision)."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "n/a"
+    if isinstance(value, (bool, np.bool_)):
+        return str(bool(value))
+    if isinstance(value, (int, np.integer)):
+        return f"{int(value):,}"
+    if isinstance(value, (float, np.floating)):
+        return f"{float(value):,.2f}" if abs(value) >= 1 else f"{float(value):.4f}"
+    return str(value)
+
+
+def _describe_row(row: pd.Series, limit: int = 8) -> str:
+    cells = [f"{str(col).replace('_', ' ')}: {_format_value(row[col])}" for col in list(row.index)[:limit]]
+    return "; ".join(cells)
+
+
 def summarize_generic(df: pd.DataFrame, lang: str) -> Tuple[str, float]:
-    """Fallback summary for unstructured results."""
+    """
+    Fallback summary for results that are neither a time series nor a ranking
+    (counts, averages, other aggregates). It states the actual values: an
+    answer that only describes the shape of the result tells the reader nothing.
+    """
     if df.empty:
         msg = (
             "No data available to answer the question."
@@ -395,11 +417,17 @@ def summarize_generic(df: pd.DataFrame, lang: str) -> Tuple[str, float]:
         )
         return msg, 0.0
 
-    summary = (
-        f"Analysis processed {len(df)} rows and {len(df.columns)} columns."
-        if lang == "en"
-        else f"Analisis memproses {len(df)} baris dan {len(df.columns)} kolom."
-    )
+    indonesian = lang.startswith("id")
+    first = _describe_row(df.iloc[0])
+
+    if len(df) == 1:
+        summary = f"Hasil analisis, {first}." if indonesian else f"Result, {first}."
+    else:
+        summary = (
+            f"Query mengembalikan {len(df)} baris. Baris pertama: {first}."
+            if indonesian
+            else f"The query returned {len(df)} rows. First row: {first}."
+        )
     return summary, 0.5
 
 # =============================================================================
