@@ -161,7 +161,7 @@ def test_every_case_has_valid_expectations():
     ids = [c["id"] for c in cases]
     assert len(ids) == len(set(ids))
     for c in cases:
-        assert c["expected_route"] in {"analytics", "rag", "reject"}, c["id"]
+        assert c["expected_route"] in {"analytics", "rag", "reject", "hybrid"}, c["id"]
         assert c["expected_behavior"] in {"answer", "refusal", "degraded"}, c["id"]
         assert c["language"] in {"en", "id"}, c["id"]
         if c["expected_route"] == "reject":

@@ -74,11 +74,11 @@ def test_keyword_rules_route_the_case_without_the_llm(case, llm_calls):
     assert llm_calls == []
 
 
-def test_the_compound_question_goes_down_one_path_only(llm_calls):
-    (case,) = [c for c in CASES if c["category"] == "compound"]
-    intent, *_ = detect_intent(case["text"], "en")
-    assert intent == "analytics"          # the ranking half; the explanation half is not attempted
-    assert intent in {"analytics", "rag", "reject"}   # there is no hybrid route to take
+@pytest.mark.parametrize("case", [c for c in CASES if c["category"] == "compound"], ids=lambda c: c["id"])
+def test_compound_questions_take_the_hybrid_route_without_the_llm(case, llm_calls):
+    intent, _lang, confidence, method = detect_intent(case["text"], case["language"])
+    assert (intent, method) == ("hybrid", "heuristic") and confidence >= 0.8
+    assert llm_calls == []
 
 
 # ---- cases the guardrails reject ------------------------------------------

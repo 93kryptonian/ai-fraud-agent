@@ -43,17 +43,19 @@ def test_data_answers_must_carry_sql_and_document_answers_citations():
             assert c.get("expect_citations") is True, c["id"]
 
 
-def test_the_compound_question_is_a_labelled_known_limitation_not_a_scored_claim():
+def test_compound_questions_expect_the_hybrid_route_with_both_kinds_of_evidence():
     compound = [c for c in load_cases() if c["category"] == "compound"]
-    assert len(compound) == 1
-    (c,) = compound
-    assert c["scored"] is False and "single path" in c["note"]
-    # nothing else is exempt from scoring
-    assert [x["id"] for x in load_cases() if x.get("scored", True) is False] == [c["id"]]
+    assert len(compound) >= 2
+    for c in compound:
+        assert c["expected_route"] == "hybrid" and c.get("scored", True) is True, c["id"]
+        assert c.get("expect_sql") is True and c.get("expect_citations") is True, c["id"]
+    assert {c["language"] for c in compound} == {"en", "id"}
 
 
-def test_no_hybrid_route_is_expected_anywhere():
-    assert {c["expected_route"] for c in load_cases()} <= {"analytics", "rag", "reject"}
+def test_only_compound_cases_expect_the_hybrid_route():
+    for c in load_cases():
+        assert (c["expected_route"] == "hybrid") == (c["category"] == "compound"), c["id"]
+    assert {c["expected_route"] for c in load_cases()} <= {"analytics", "rag", "reject", "hybrid"}
 
 
 def test_any_recorded_known_gap_carries_a_reason():

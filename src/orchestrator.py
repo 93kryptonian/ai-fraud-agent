@@ -60,6 +60,15 @@ def sanitize_input(raw: str) -> str:
 
     return query
 
+# Below this answer score the RAG branch replaces its answer with a refusal.
+RAG_MIN_SCORE = 0.12
+
+# Every route the orchestrator can take (the telemetry `intent`/`route` domain).
+# The LLM classifier can only choose among the first three: "hybrid" is decided
+# by the keyword rules.
+KNOWN_INTENTS = frozenset({"rag", "analytics", "reject", "hybrid"})
+LLM_INTENTS = frozenset({"rag", "analytics", "reject"})
+
 # =============================================================================
 # INTENT DETECTION
 # =============================================================================
@@ -85,13 +94,24 @@ _DOC_ENTITY_RE = re.compile(
 )
 
 
+# A question that asks for numbers AND an explanation ("which categories have
+# the highest fraud rate, and what might explain it?") needs both pipelines.
+_EXPLAIN_RE = re.compile(
+    r"\b(why|explains?|explained|reasons?|causes?|drivers?|mengapa|kenapa|jelaskan|penyebab|faktor)\b",
+    re.I,
+)
+
+
 def detect_intent_heuristic(query: str) -> Tuple[str, float]:
     """
     Fast heuristic intent classifier.
 
     Returns:
-        intent: "rag" | "analytics"
+        intent: "rag" | "analytics" | "hybrid"
         confidence: [0,1]
+
+    "hybrid" is decided by these keyword rules only; the LLM classifier still
+    chooses among rag | analytics | reject.
     """
     q = query.lower()
 
@@ -104,16 +124,21 @@ def detect_intent_heuristic(query: str) -> Tuple[str, float]:
         "timeline", "evolution", "periode",
     )
 
-    if any(k in q for k in timeseries_kw):
-        return "analytics", 0.95
-
     is_doc_question = bool(_DOC_ENTITY_RE.search(q))
+    wants_explanation = bool(_EXPLAIN_RE.search(q))
+
+    if any(k in q for k in timeseries_kw):
+        if wants_explanation and not is_doc_question:
+            return "hybrid", 0.90
+        return "analytics", 0.95
 
     if (
         not is_doc_question
         and _RANKING_RE.search(q)
         and _DATA_ENTITY_RE.search(q)
     ):
+        if wants_explanation:
+            return "hybrid", 0.90
         return "analytics", 0.90
 
     conceptual_kw = (
@@ -160,7 +185,7 @@ def detect_intent_llm(query: str) -> Tuple[str, str]:
         raise IntentClassificationError(type(e).__name__) from e
 
     # Never trust unvalidated LLM labels for routing
-    if intent not in {"rag", "analytics", "reject"}:
+    if intent not in LLM_INTENTS:
         logger.error(f"[intent_llm] Unusable label {intent!r} | resp={resp!r}")
         raise IntentClassificationError("unknown_label")
     if lang not in {"en", "id"}:
@@ -259,7 +284,7 @@ def _run_rag_branch(query: str, user_lang: str) -> Dict[str, Any]:
         logger.info(f"[orchestrator] RAG score={final_score:.3f}")
 
         # Low-confidence fallback
-        if final_score < 0.12:
+        if final_score < RAG_MIN_SCORE:
             if rag_res.get("retrieval_status") == "unavailable":
                 fallback_msg = (
                     "Maaf, pencarian dokumen sedang tidak tersedia. Coba lagi nanti."
@@ -317,6 +342,73 @@ def _run_rag_branch(query: str, user_lang: str) -> Dict[str, Any]:
             "result": None,
             "error": "RAG pipeline failed.",
         }
+
+
+_HYBRID_RAG_KEYS = ("answer", "insight", "citations", "retrieval_status", "score")
+
+
+def _analytics_part(branch: Dict[str, Any]):
+    """(analytics dict or None, status). A pipeline that returned no answer is a failure, not an answer."""
+    analytics = (branch.get("result") or {}).get("analytics") if not branch.get("error") else None
+    if not isinstance(analytics, dict) or not analytics.get("answer"):
+        return None, "failed"
+    return analytics, "ok" if analytics.get("data_points") else "no_data"
+
+
+def _rag_part(branch: Dict[str, Any]):
+    """(rag dict without raw chunks or None, status)."""
+    result = branch.get("result") if not branch.get("error") else None
+    if not isinstance(result, dict) or not result.get("answer"):
+        return None, "failed"
+    rag = {k: result.get(k) for k in _HYBRID_RAG_KEYS if k in result}
+    score = (result.get("score") or {}).get("final_score", 0.0)
+    healthy = result.get("retrieval_status") in (None, "ok") and score >= RAG_MIN_SCORE
+    return rag, "ok" if healthy else "degraded"
+
+
+def _run_hybrid_branch(query: str, user_lang: str) -> Dict[str, Any]:
+    """
+    A question that needs both jobs: the numbers (analytics, with its SQL) and
+    an explanation from the documents (RAG). The two pipelines run one after
+    the other and each keeps its own events, cost and failure handling. If one
+    half fails the answer says so; if both fail the request fails.
+    """
+    analytics, analytics_status = _analytics_part(_run_analytics_branch(query, user_lang))
+    rag, rag_status = _rag_part(_run_rag_branch(query, user_lang))
+
+    if analytics is None and rag is None:
+        return {"query": query, "intent": "hybrid", "result": None, "error": "Hybrid pipeline failed."}
+
+    indonesian = user_lang == "id"
+    sections = []
+    if analytics is not None:
+        sections.append(analytics["answer"])
+    else:
+        sections.append(
+            "Data transaksi tidak dapat dianalisis untuk pertanyaan ini."
+            if indonesian else "The transaction data could not be analyzed for this question."
+        )
+    if rag is not None:
+        label = "Menurut dokumen:" if indonesian else "What the documents say:"
+        sections.append(f"{label} {rag['answer']}")
+    else:
+        sections.append(
+            "Penjelasan dari dokumen tidak tersedia."
+            if indonesian else "An explanation from the documents is not available."
+        )
+
+    return {
+        "query": query,
+        "intent": "hybrid",
+        "error": None,
+        "result": {
+            "type": "hybrid",
+            "answer": "\n\n".join(sections),
+            "analytics": analytics,
+            "rag": rag,
+            "parts": {"analytics": analytics_status, "rag": rag_status},
+        },
+    }
 
 
 def run_query(raw_query: str, detected_lang: str = None) -> Dict[str, Any]:
@@ -390,6 +482,10 @@ def run_query(raw_query: str, detected_lang: str = None) -> Dict[str, Any]:
         f"[orchestrator] intent={intent} | lang={user_lang} | query={query!r}"
     )
 
+    if intent not in KNOWN_INTENTS:
+        logger.warning(f"[orchestrator] unknown intent {intent!r}; routing to rag")
+        intent = "rag"
+
     # ------------------------------------------------------------------
     # 4. Reject handling
     # ------------------------------------------------------------------
@@ -412,5 +508,8 @@ def run_query(raw_query: str, detected_lang: str = None) -> Dict[str, Any]:
     # ------------------------------------------------------------------
     if intent == "analytics":
         return _run_analytics_branch(query, user_lang)
+
+    if intent == "hybrid":
+        return _run_hybrid_branch(query, user_lang)
 
     return _run_rag_branch(query, user_lang)

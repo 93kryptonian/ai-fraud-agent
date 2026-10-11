@@ -485,9 +485,9 @@ Rules:
 | `guardrails.completed` | `reason` | dimension | `injection`, `noise`, `none`, `out_of_domain`, `too_short`; else `other` |
 | `guardrails.completed` | `status` | dimension | `success`; else `other` |
 | `intent.completed` | `confidence` | measure |  |
-| `intent.completed` | `intent` | dimension | `analytics`, `rag`, `reject`; else `other` |
+| `intent.completed` | `intent` | dimension | `analytics`, `hybrid`, `rag`, `reject`; else `other` |
 | `intent.completed` | `method` | dimension | `heuristic`, `llm`; else `other` |
-| `intent.completed` | `route` | dimension | `analytics`, `rag`, `reject`; else `other` |
+| `intent.completed` | `route` | dimension | `analytics`, `hybrid`, `rag`, `reject`; else `other` |
 | `intent.completed` | `status` | dimension | `success`; else `other` |
 | `intent.failed` | `error_type` | dimension | known exception classes, else `other` |
 | `intent.failed` | `status` | dimension | `failure`; else `other` |
@@ -555,7 +555,7 @@ Rules:
 | `embedding.failed` | 115 |
 | `guardrails.blocked` | 18 |
 | `guardrails.completed` | 18 |
-| `intent.completed` | 48 |
+| `intent.completed` | 75 |
 | `intent.failed` | 23 |
 | `language_detection.completed` | 1 |
 | `language_detection.failed` | 1 |

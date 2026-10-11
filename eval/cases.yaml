@@ -7,7 +7,7 @@
 #                           out-of-domain check
 #                llm        needs the LLM classifier (live run only)
 #   language   language of the question, and of the expected answer
-#   scored     false = reported but not counted in pass/fail (known limitation)
+#   scored     false = reported but not counted in pass/fail (a known limitation)
 #
 # Expectations describe the intended behavior. A failing live case is a finding
 # to report, not a reason to edit the case.
@@ -209,17 +209,27 @@
   must_include: [fraud]
   expect_citations: true
 
-# ---- compound: KNOWN LIMITATION, not scored --------------------------------
-# One question that needs two jobs (rank with SQL, then explain from documents).
-# The system picks ONE path, so it can only do the first job. This case records
-# what happens; it does not claim a hybrid workflow exists.
+# ---- compound: needs both jobs, so it takes the hybrid route --------------
+# One question asking for numbers (SQL) AND an explanation (documents). The
+# orchestrator runs both pipelines; the answer must carry the SQL and the citations.
 - id: C1
   text: "Which merchant categories have the highest fraud rates, and what might explain the pattern?"
   language: en
   category: compound
   decision: heuristic
-  expected_route: analytics
+  expected_route: hybrid
   expected_behavior: answer
+  must_include: [fraud]
   expect_sql: true
-  scored: false
-  note: "single path by design: the explanation half is not attempted"
+  expect_citations: true
+
+- id: C2
+  text: "Merchant mana yang memiliki fraud tertinggi dan jelaskan penyebabnya?"
+  language: id
+  category: compound
+  decision: heuristic
+  expected_route: hybrid
+  expected_behavior: answer
+  must_include: [fraud]
+  expect_sql: true
+  expect_citations: true
