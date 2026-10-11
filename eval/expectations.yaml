@@ -5,6 +5,7 @@ Q1:
     - fraud rate
     - time
   language: en
+  expect_sql: true
 
 Q2:
   expected_route: rag
@@ -12,6 +13,7 @@ Q2:
   must_include:
     - card-not-present
   language: id
+  expect_citations: true
 
 Q3:
   expected_route: reject

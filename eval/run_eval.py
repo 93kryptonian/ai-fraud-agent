@@ -1,92 +1,59 @@
 # eval/run_eval.py
+"""
+Live evaluation: send every case through the real API app (guardrails, router,
+orchestrator) and compare each response with its expectations.
+
+This is an integration check. It calls the real LLM and database when
+credentials are present, so run it by hand:
+
+    python -m eval.run_eval
+"""
+
+import os
+from pathlib import Path
 
 import yaml
-from pprint import pprint
-from src.orchestrator import run_query
+
+# The limiter is per client address and a run is one client: keep it out of the way.
+os.environ.setdefault("RATE_LIMIT_PER_MINUTE", "1000")
+
+from eval.evaluator import check_case, observe  # noqa: E402
+
+HERE = Path(__file__).parent
 
 
-def load_yaml(path):
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
+def load_cases():
+    queries = yaml.safe_load((HERE / "queries.yaml").read_text())
+    expectations = yaml.safe_load((HERE / "expectations.yaml").read_text())
+    return [{**q, **expectations[q["id"]]} for q in queries]
 
 
-def check_contains(text: str, keywords):
-    text = text.lower()
-    return all(k.lower() in text for k in keywords)
+def run() -> int:
+    from fastapi.testclient import TestClient
 
+    from api.main import create_app
 
-def infer_behavior(result):
-    if not result:
-        return "unknown"
-
-    if result.get("type") == "error":
-        return "refusal"
-
-    if "answer" in result and result.get("answer"):
-        return "answer"
-
-    return "unknown"
-
-
-def run():
-    queries = load_yaml("eval/queries.yaml")
-    expectations = load_yaml("eval/expectations.yaml")
-
+    client = TestClient(create_app())
     results = []
 
-    for q in queries:
-        qid = q["id"]
-        text = q["text"]
+    for case in load_cases():
+        response = client.post("/query", json={"query": case["text"]})
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        result = check_case(case, observe(body, response.status_code))
+        results.append(result)
 
-        print("\n" + "=" * 60)
-        print(f"Query {qid}: {text}")
+        mark = "PASS" if result.passed else "FAIL"
+        print(f"{mark} {result.id}  route={result.observed.route}  behavior={result.observed.behavior}")
+        for failure in result.failures:
+            print(f"     - {failure}")
 
-        out = run_query(text)
-        intent = out.get("intent")
-        result = out.get("result")
-
-        exp = expectations[qid]
-
-        # ---- checks ----
-        route_ok = intent == exp["expected_route"]
-        behavior = infer_behavior(result)
-        behavior_ok = behavior == exp["expected_behavior"]
-
-        include_ok = True
-        if "must_include" in exp and behavior == "answer":
-            include_ok = check_contains(
-                result.get("answer", ""),
-                exp["must_include"],
-            )
-
-        lang_ok = True
-        if behavior == "answer":
-            lang_ok = result.get("_lang") == exp.get("language")
-
-        passed = all([route_ok, behavior_ok, include_ok, lang_ok])
-
-        outcome = {
-            "id": qid,
-            "route_ok": route_ok,
-            "behavior_ok": behavior_ok,
-            "include_ok": include_ok,
-            "language_ok": lang_ok,
-            "passed": passed,
-        }
-
-        pprint(outcome)
-        results.append(outcome)
-
-    # ---- summary ----
-    total = len(results)
-    passed = sum(1 for r in results if r["passed"])
-
-    print("\n" + "=" * 60)
-    print(f"SUMMARY: {passed}/{total} passed")
-
-    if passed != total:
-        raise SystemExit("Evaluation failed")
+    passed = sum(r.passed for r in results)
+    print(f"\nSUMMARY: {passed}/{len(results)} passed")
+    return 0 if passed == len(results) else 1
 
 
 if __name__ == "__main__":
-    run()
+    raise SystemExit(run())
