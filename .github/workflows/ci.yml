@@ -43,7 +43,16 @@ jobs:
       - name: Lint (ruff)
         run: |
           pip install "ruff==0.14.10"
-          ruff check src api tests
+          ruff check src api tests eval
+
+      # --------------------------------------------------
+      # Routing gate (offline, no credentials)
+      # --------------------------------------------------
+      - name: Routing gate (offline eval)
+        env:
+          OPENAI_API_KEY: ""
+        run: |
+          pytest -q tests/test_eval_offline_routing.py tests/test_eval_contract.py tests/test_eval_cases.py
 
       # --------------------------------------------------
       # Tests (LLM-safe)
