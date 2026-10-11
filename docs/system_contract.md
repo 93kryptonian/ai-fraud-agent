@@ -75,7 +75,7 @@ Rejected inputs result in **explicit refusal**, not silent failure.
 For all valid requests, the system guarantees:
 
 - A structured response containing:
-  - Intent classification (`rag`, `analytics`, or `reject`)
+  - Intent classification (`rag`, `analytics`, `hybrid`, or `reject`). `hybrid` is a question that needs both the numbers (SQL) and an explanation from the documents: both pipelines run, and the answer says which half could not be supported
   - A grounded answer or rejection message
 - Language preservation:
   - Output matches the user’s input language

@@ -12,8 +12,9 @@ def test_the_documented_counts_match_cases_yaml():
     cases = load_cases()
     scored = sum(1 for c in cases if c.get("scored", True))
     languages = Counter(c["language"] for c in cases)
+    scope = "all scored" if scored == len(cases) else f"{scored} scored, {len(cases) - scored} known limitation"
     assert f"<!-- eval-cases: {len(cases)} cases, {scored} scored -->" in DOC
-    assert f"**{len(cases)} cases ({scored} scored, {len(cases) - scored} known limitation)**" in DOC
+    assert f"**{len(cases)} cases ({scope})**" in DOC
     assert f"{languages['en']} English, {languages['id']} Indonesian" in DOC
 
 

@@ -336,7 +336,7 @@ documented values (observed here only for the first 30 s).
 
 ## 10. Findings from the evaluation (2026-10-11)
 
-Found by running the evaluation set ([evaluation.md](evaluation.md)).
+Found by running the evaluation set ([evaluation.md](evaluation.md)). All are fixed; the last two are limits of the fixes.
 
 | Finding | Where | Status |
 |---|---|---|
@@ -344,5 +344,15 @@ Found by running the evaluation set ([evaluation.md](evaluation.md)).
 | Prompt-injection patterns were English only | `FORBIDDEN_PATTERNS`, `src/safety/guardrails.py` | **Fixed**: Indonesian patterns added |
 | A rejected input could cost an LLM call (language detection ran first) | `validate_query`, `src/safety/guardrails.py` | **Fixed**: rejections use an LLM-free language guess |
 | A failed intent classifier was reported as an LLM decision | `detect_intent`, `src/orchestrator.py` | **Fixed**: reported as `method=heuristic`, confidence 0.40 |
-| A question needing two jobs gets one path | orchestrator routing | Open, by design: recorded as the scored-exempt case C1 |
-| Embedding cost is not in the telemetry | `src/embeddings/embedder.py` | Open: changes the cost semantics in the observability contract |
+| A question needing two jobs got one path | orchestrator routing | **Fixed**: the `hybrid` route runs both pipelines (see below) |
+| Embedding cost was not in the telemetry | `src/embeddings/embedder.py` | **Fixed**: `embedding.completed` / `embedding.failed`, priced and counted in the request cost |
+| An Indonesian "the documents do not say" refusal scored 0.415 and was shown as a confident answer | `heuristic_score`, `src/llm/scoring.py` | **Fixed**: refusal detection in both languages (`src/llm/refusal.py`) |
+
+**Limits of the hybrid route.**
+
+- It is decided by keyword rules only. The LLM classifier still chooses among `rag`, `analytics` and `reject`, so a compound question phrased without the rule keywords goes down one path.
+- The two pipelines run one after the other, so latency adds (measured 4.6 to 12.0 s for the four evaluation cases).
+- The document half is asked the explanation clause when it can stand alone (at least five words), otherwise the whole question. Given the whole question, the document model declines when the data half is not in the documents, even if the explanation half is.
+- The corpus (Bhatla, EBA/ECB report) has nothing on merchant-category patterns, so the documents cannot explain them: those compound questions are correctly answered as `degraded` (numbers with SQL, and an honest "not enough information" for the explanation).
+
+**Embedding cost.** One query embedding is about 7 to 17 tokens, about $0.0000002 to $0.0000003. Over the 24 evaluation cases (11 embedding calls, 120 tokens) it was about $0.0000024, about 0.025% of the LLM spend (a fortieth of one percent). It is below the 6-decimal resolution of a request's `cost_usd_total`, so it is recorded per call (9 decimals) and in `embedding_cost_usd_total`.

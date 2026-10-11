@@ -77,7 +77,8 @@ The system is composed of specialized agents, each with a clearly defined role:
 - **Intent Classification Agent**
   Determines whether a query requires:
   - knowledge retrieval (RAG),
-  - data computation (analytics), or
+  - data computation (analytics),
+  - both, when the question asks for numbers and an explanation (hybrid), or
   - rejection (out of domain).
 
 - **RAG Agent**

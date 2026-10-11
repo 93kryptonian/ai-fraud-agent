@@ -23,8 +23,8 @@ answer when the evidence supports it, refuse when it should, and notice when tha
 
 ## 2. The case set
 
-<!-- eval-cases: 21 cases, 20 scored -->
-**21 cases (20 scored, 1 known limitation)**: 16 English, 5 Indonesian.
+<!-- eval-cases: 24 cases, 24 scored -->
+**24 cases (all scored)**: 17 English, 7 Indonesian.
 
 | Category | Cases | What it checks |
 |---|---|---|
@@ -32,16 +32,19 @@ answer when the evidence supports it, refuse when it should, and notice when tha
 | rag | 6 | document questions; the answer must carry citations |
 | reject | 4 | prompt injection and out-of-domain questions must be refused |
 | ambiguous | 2 | no keyword rule applies; the LLM classifier decides |
-| compound | 1 | **known limitation, not scored** (see below) |
+| compound | 4 | numbers and an explanation in one question: the `hybrid` route |
 
 Each case records what the system *should* do and which layer is expected to decide the
 route: `heuristic` (keyword rules), `guardrail` (input guardrails) or `llm` (classifier).
 Cases describe intended behavior; a failing live case is a finding, not a reason to edit the case.
 
-**Compound question.** "Which merchant categories have the highest fraud rates, and what might
-explain the pattern?" needs two jobs (rank with SQL, explain from documents). The system picks
-one path, so it answers only the first. The case records that behavior; there is no hybrid
-workflow and none is claimed.
+**Compound questions.** A question like "which merchants have the highest fraud incidence, and why
+does card-not-present fraud occur?" needs two jobs, so it takes the `hybrid` route: analytics (with
+its SQL) and RAG (with its citations) both run. The expectation depends on the corpus. Where the
+documents can explain (C3, C4) the answer must be a full `answer` carrying both kinds of evidence.
+Where they cannot (C1, C2: the documents say nothing about merchant-category patterns) the correct
+outcome is `degraded`: the numbers are answered with their SQL and the explanation honestly says
+there is not enough information. A corpus gap is reported as `degraded`, never as a pass.
 
 ---
 
@@ -49,15 +52,15 @@ workflow and none is claimed.
 
 For every case, from the response `POST /query` really returns:
 
-- **Route**: the route the API reported (`analytics`, `rag` or `reject`).
-- **Behavior**: `answer`, `refusal`, `degraded` (retrieval unavailable) or `error`. A malformed
+- **Route**: the route the API reported (`analytics`, `rag`, `hybrid` or `reject`).
+- **Behavior**: `answer`, `refusal`, `degraded` (retrieval unavailable, or one half of a hybrid answer unsupported) or `error`. A malformed
   response, an HTTP error or a rate limit is never a pass.
 - **Required terms**: terms that must appear in the answer. A list means alternatives (an answer
   in another language may translate the term). This checks that expected terms are present; it
   does **not** establish that the answer is complete or correct.
 - **Answer language**: judged from the answer text by a function-word count. It is a heuristic
   and returns "unknown" for text too short to judge, which fails the check.
-- **Grounding**: analytics answers must carry SQL; document answers must carry citations.
+- **Grounding**: analytics answers must carry SQL; document answers must carry citations; a hybrid answer must carry both.
 
 ---
 
@@ -97,56 +100,69 @@ with confidence 0.40, which a real heuristic decision never has (those are at le
 
 ## 5. Live results (2026-10-11, one machine, real OpenAI, read-only Supabase)
 
-The 21 cases, run four times as the checks and the system were corrected. Every verdict below
-was made after reading the actual answers.
+The cases, run six times as the checks and the system were corrected. Every verdict below was
+made after reading the actual answers.
 
-| Run | System | Checks | Scored cases passed |
+| Run | System | Cases | Scored cases passed |
 |---|---|---|---|
-| 1 | original | first version | 15 / 20 |
-| 2 | original | corrected (4 evaluator defects fixed) | 19 / 20 |
-| 3 | fixed | corrected | 19 / 20 (the remaining failure was the evaluator's language judge) |
-| 4 | fixed | corrected | **20 / 20** |
+| 1 | original | 21 | 15 / 20 |
+| 2 | original, corrected checks | 21 | 19 / 20 |
+| 3 | after the first four fixes | 21 | 19 / 20 (the failure was the evaluator's language judge) |
+| 4 | after the first four fixes | 21 | 20 / 20 |
+| 5 | hybrid route and embedding cost added | 22 | 21 / 22 (one case passed that should not have: see below) |
+| 6 | all fixes | 24 | 23 / 24 |
 
-**What the failures were.** Run 1 had five failures: four were defects in the evaluator itself (a
-language judge too small to recognise two correct Indonesian answers, and two expectations that
-hard-coded a surface form) and one was a real system defect (A5). Fixing the evaluator did not
-change the system; run 2 shows the same system with one failure left.
+**What the failures were.** Run 1 had five: four were defects in the evaluator itself (a language
+judge too small to recognise two correct Indonesian answers, two expectations that hard-coded a
+surface form) and one was a real system defect (A5). Run 5 is the instructive one: its Indonesian
+compound case passed, but its document half was an apology ("dokumen yang tersedia tidak memberikan
+cukup informasi"), which the system scored 0.415 and the evaluator accepted. The refusal check knew
+only the English sentence. Fixing it made that case honestly `degraded`.
+
+**Run 6's one failure (R1)** is model variance: "what are the main fraud typologies..." failed its
+required-term check ("fraud" not in the answer) once, after passing in every earlier run; four
+re-asks all passed. A single live run is a sample, not a proof, and a required term in generated
+text can be flaky.
 
 **Findings fixed in the system, each with tests that fail without the fix:**
 
 - **A5, a value dropped from the answer.** "How many fraudulent transactions are there in total?"
-  ran correct SQL but answered "Analysis processed 1 rows and 1 columns." Any analytics result that
-  was not a time series or a ranking got a shape-only summary. It now states the values
-  ("Result, total fraudulent transactions: 7,506.").
-- **Indonesian prompt injection was not detected.** All six patterns were English. Indonesian
-  equivalents were added, with benign Indonesian questions (including one that only a word boundary
-  protects) that must not be flagged.
-- **A rejected input could cost an LLM call.** Language detection ran before the rejection checks
-  and fell back to the LLM for text its keywords did not recognise. A rejection now uses an
-  LLM-free language guess; the authoritative detection runs only for accepted queries.
-- **A failed intent classifier looked like a decision.** See the 0.40 fallback above.
+  ran correct SQL but answered "Analysis processed 1 rows and 1 columns." It now states the values.
+- **Indonesian prompt injection was not detected.** All six patterns were English; Indonesian ones
+  were added, with benign Indonesian questions that must not be flagged.
+- **A rejected input could cost an LLM call.** Language detection ran before the rejection checks.
+- **A failed intent classifier looked like a decision.** It is now reported as `method=heuristic`
+  with confidence 0.40, which a real heuristic decision never has.
+- **A compound question got one path.** The `hybrid` route runs both pipelines (below).
+- **Embedding cost was not in the telemetry.** Embedding calls are now events, priced from usage
+  and counted in the request cost (below).
+- **An Indonesian refusal scored as a confident answer.** Refusal detection now covers both languages.
 
-**Measured effect (run 2, before, vs run 4, after):** the Indonesian injection (X2) went from three
-LLM calls and about 2.0 s (rejected late, by the LLM classifier) to zero calls and under 5 ms
-(rejected by the guardrails). Total LLM calls over the 21 cases went from 30 to 27.
+**Measured effects:**
 
-**Measurements (run 4; client machine to the cloud services):**
+- *Indonesian injection (X2):* from three LLM calls and about 2.0 s (rejected late, by the LLM
+  classifier) to no LLM calls and under 5 ms (rejected by the guardrails).
+- *Hybrid:* the four compound cases took 4.6 to 12.0 s (the two pipelines run one after the other)
+  and made 2 to 5 LLM calls and one embedding call each. C3 and C4 returned full answers with SQL
+  and citations; C1 and C2 returned `degraded`, correctly, for the corpus reason above.
+- *Embedding cost:* 11 embedding calls, 120 tokens, about $0.0000024 in total, about 0.025% of
+  the roughly $0.0096 of LLM spend in the same run (a fortieth of one percent). It is below the 6-decimal
+  resolution of a request's `cost_usd_total`, so it is recorded per call and in
+  `embedding_cost_usd_total`.
 
-- Request duration from telemetry: median about 3.0 s, max about 9.3 s. Template analytics answers
-  took about 2.4 to 4.0 s; document answers 3.8 to 9.3 s; Indonesian document answers (with a
-  translation step) 8.7 to 9.3 s; guardrail rejections a few milliseconds.
-- LLM cost from telemetry: about $0.0075 for the whole run (27 priced LLM calls, 0 failures).
-  Template analytics answers made no LLM call; each document answer cost about $0.001.
-- Route decided by: keyword rules 15, LLM classifier 2, guardrails 4 (of 21 requests).
+**Measurements (run 6; client machine to the cloud services):**
 
-**Not fixed, by design or scope:**
+- Request duration from telemetry: median about 3.3 s, max about 12.0 s. Template analytics answers
+  took about 2.3 to 3.9 s; document answers 3.2 to 8.8 s; guardrail rejections a few milliseconds.
+- LLM calls: 37 over 24 requests, 0 failures. Route decided by: keyword rules 18, LLM classifier 2,
+  guardrails 4.
 
-- **A compound question gets one path.** C1 records this; there is no hybrid workflow.
-- **Embedding cost is not in the telemetry.** Only LLM calls are priced. Pricing embeddings would
-  change the cost semantics in `docs/observability-contract.md`, so it needs its own decision.
+**Limits that remain:** `hybrid` is decided by keyword rules only; the LLM classifier cannot
+choose it, so a compound question phrased without the rule keywords still goes down one path. The
+corpus has no evidence on merchant-category patterns.
 
 **Not measured:** answer quality beyond the checks above; latency from other locations; variance
-beyond four runs on one day (runs 1 to 4 made the same routing decisions except where a fix changed them).
+beyond six runs on one day.
 
 ---
 
@@ -169,4 +185,4 @@ An earlier version of this document said behavioral regressions block deployment
 - **Answer completeness and correctness**: only required-term presence is checked.
 - **Refusal usefulness** and narrative quality: not automated, not reviewed systematically.
 - **Retrieval quality**: not evaluated independently of the final answer.
-- **Variance across runs and models**: four runs on one day.
+- **Variance across runs and models**: six runs on one day; one required-term check failed once for no system reason.

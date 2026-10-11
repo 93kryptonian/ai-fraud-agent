@@ -211,9 +211,33 @@
 
 # ---- compound: needs both jobs, so it takes the hybrid route --------------
 # One question asking for numbers (SQL) AND an explanation (documents). The
-# orchestrator runs both pipelines; the answer must carry the SQL and the citations.
+# orchestrator runs both pipelines. The answer is "answer" only when BOTH halves
+# are supported; when the documents have no evidence for the explanation, the
+# honest outcome is "degraded" (the numbers are still answered, with their SQL).
+
+# The corpus (Bhatla, EBA/ECB report) has nothing on merchant-category patterns:
+# checked by asking the document model for the explanation alone, which also declines.
 - id: C1
   text: "Which merchant categories have the highest fraud rates, and what might explain the pattern?"
+  language: en
+  category: compound
+  decision: heuristic
+  expected_route: hybrid
+  expected_behavior: degraded
+  expect_sql: true
+
+- id: C2
+  text: "Merchant mana yang memiliki fraud tertinggi dan jelaskan penyebabnya?"
+  language: id
+  category: compound
+  decision: heuristic
+  expected_route: hybrid
+  expected_behavior: degraded
+  expect_sql: true
+
+# The documents do explain card-not-present fraud, so both halves can be supported.
+- id: C3
+  text: "Which merchants have the highest fraud incidence, and why does card-not-present fraud occur?"
   language: en
   category: compound
   decision: heuristic
@@ -223,8 +247,8 @@
   expect_sql: true
   expect_citations: true
 
-- id: C2
-  text: "Merchant mana yang memiliki fraud tertinggi dan jelaskan penyebabnya?"
+- id: C4
+  text: "Merchant mana yang memiliki fraud tertinggi, dan mengapa penipuan kartu tidak hadir bisa terjadi?"
   language: id
   category: compound
   decision: heuristic

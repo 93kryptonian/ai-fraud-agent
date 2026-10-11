@@ -43,13 +43,17 @@ def test_data_answers_must_carry_sql_and_document_answers_citations():
             assert c.get("expect_citations") is True, c["id"]
 
 
-def test_compound_questions_expect_the_hybrid_route_with_both_kinds_of_evidence():
+def test_compound_questions_expect_the_hybrid_route_in_both_languages_with_a_supported_and_an_unsupported_case():
     compound = [c for c in load_cases() if c["category"] == "compound"]
-    assert len(compound) >= 2
+    assert len(compound) >= 4
     for c in compound:
         assert c["expected_route"] == "hybrid" and c.get("scored", True) is True, c["id"]
-        assert c.get("expect_sql") is True and c.get("expect_citations") is True, c["id"]
+        assert c.get("expect_sql") is True, c["id"]
+        if c["expected_behavior"] == "answer":
+            assert c.get("expect_citations") is True, c["id"]
     assert {c["language"] for c in compound} == {"en", "id"}
+    # the document half is supported in some cases and honestly unsupported in others
+    assert {c["expected_behavior"] for c in compound} == {"answer", "degraded"}
 
 
 def test_only_compound_cases_expect_the_hybrid_route():
