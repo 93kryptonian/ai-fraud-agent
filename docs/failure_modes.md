@@ -336,13 +336,13 @@ documented values (observed here only for the first 30 s).
 
 ## 10. Findings from the evaluation (2026-10-11)
 
-Found by running the evaluation set ([evaluation.md](evaluation.md)). Recorded, not fixed.
+Found by running the evaluation set ([evaluation.md](evaluation.md)).
 
-| Finding | Where | Effect |
+| Finding | Where | Status |
 |---|---|---|
-| A scalar or generic analytics result loses its value: the summary is "Analysis processed N rows and M columns." | `summarize_generic` in `src/analytics/fraud_analytics.py` | "How many fraudulent transactions...?" runs correct SQL and returns an answer with no number |
-| Prompt-injection patterns are English only | `FORBIDDEN_PATTERNS` in `src/safety/guardrails.py` | An Indonesian injection passes the guardrails; the LLM intent classifier caught it in the live run, at the cost of an LLM call |
-| Failure of the LLM intent classifier silently becomes `rag` | `detect_intent_llm` in `src/orchestrator.py` | An ambiguous question can be answered by the wrong path with no sign of the failure |
-| A question needing two jobs gets one path | orchestrator routing | A compound question (rank, then explain) is answered only by analytics |
-| Embedding cost is not in the telemetry | `src/embeddings/embedder.py` | Per-request cost covers LLM calls only |
-
+| A scalar or generic analytics result lost its value ("Analysis processed N rows and M columns.") | `summarize_generic`, `src/analytics/fraud_analytics.py` | **Fixed**: the summary states the values |
+| Prompt-injection patterns were English only | `FORBIDDEN_PATTERNS`, `src/safety/guardrails.py` | **Fixed**: Indonesian patterns added |
+| A rejected input could cost an LLM call (language detection ran first) | `validate_query`, `src/safety/guardrails.py` | **Fixed**: rejections use an LLM-free language guess |
+| A failed intent classifier was reported as an LLM decision | `detect_intent`, `src/orchestrator.py` | **Fixed**: reported as `method=heuristic`, confidence 0.40 |
+| A question needing two jobs gets one path | orchestrator routing | Open, by design: recorded as the scored-exempt case C1 |
+| Embedding cost is not in the telemetry | `src/embeddings/embedder.py` | Open: changes the cost semantics in the observability contract |

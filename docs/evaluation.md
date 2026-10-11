@@ -77,50 +77,76 @@ orchestrator) with the real LLM and a read-only database, and records latency, c
 decided the route from the system's telemetry events. It is an integration check, run by hand.
 Its result is a measurement on one machine on one day, not a benchmark.
 
-### Known gap, recorded and enforced
+### Known gaps: recorded, enforced, and now empty
 
-All six prompt-injection patterns in the guardrails are English. The Indonesian injection case
-(X2) is therefore not rejected by the guardrails. It is a strict expected failure in the offline
-gate: if the guardrails are fixed, that test fails until the record is removed. In the live run
-X2 was still refused, because the LLM intent classifier rejected it, at the cost of an LLM call.
+A case may record a `known_gap` in `cases.yaml`. The offline gate then expects that case to fail,
+strictly: the day the gap is fixed the test fails until the record is removed, so a record cannot
+go stale. The first gap found this way was the Indonesian injection case (X2): all six injection
+patterns were English. Fixing the patterns exposed the next layer (language detection made an LLM
+call before the rejection), and fixing that emptied the list. See section 5.
 
 ### The 0.40 fallback
 
-A question matching no keyword rule gets a weak RAG guess at confidence 0.40 and is handed to
-the LLM classifier. If that classifier call fails, the result silently becomes `rag`, which cannot
-be told apart from a real RAG decision. A test documents this behavior; it is a hazard, not a design goal.
+A question matching no keyword rule gets a weak RAG guess at confidence 0.40 and is handed to the
+LLM classifier. If the classifier gives no usable label (call failed, bad JSON, unknown intent),
+the route stays that weak guess. It used to be reported as an LLM decision, which made a failed
+classifier indistinguishable from a real RAG decision. It is now reported as `method=heuristic`
+with confidence 0.40, which a real heuristic decision never has (those are at least 0.80).
 
 ---
 
 ## 5. Live results (2026-10-11, one machine, real OpenAI, read-only Supabase)
 
-Two runs of the 21 cases. Between them, four defects in the *evaluator* were fixed after the
-answers were read: the language judge was too small (two correct Indonesian answers read as
-"unknown"), and two expectations hard-coded a surface form. Each fix has tests, including cases
-where the wrong-language answer must still fail.
+The 21 cases, run four times as the checks and the system were corrected. Every verdict below
+was made after reading the actual answers.
 
-| Run | Scored cases passed | Notes |
-|---|---|---|
-| 1 (first checks) | 15 / 20 | 1 real system defect, 4 evaluator defects |
-| 2 (corrected checks) | 19 / 20 | the real defect remains |
+| Run | System | Checks | Scored cases passed |
+|---|---|---|---|
+| 1 | original | first version | 15 / 20 |
+| 2 | original | corrected (4 evaluator defects fixed) | 19 / 20 |
+| 3 | fixed | corrected | 19 / 20 (the remaining failure was the evaluator's language judge) |
+| 4 | fixed | corrected | **20 / 20** |
 
-**The failing case (A5, a real defect).** "How many fraudulent transactions are there in total?"
-produced SQL and ran it, but the summary was "Analysis processed 1 rows and 1 columns." The value
-is dropped: any analytics result that is not a time series or a ranking falls back to a generic
-summary (`summarize_generic` in `src/analytics/fraud_analytics.py`). Not fixed here.
+**What the failures were.** Run 1 had five failures: four were defects in the evaluator itself (a
+language judge too small to recognise two correct Indonesian answers, and two expectations that
+hard-coded a surface form) and one was a real system defect (A5). Fixing the evaluator did not
+change the system; run 2 shows the same system with one failure left.
 
-**Measurements (run 2; client-side machine to the cloud services):**
+**Findings fixed in the system, each with tests that fail without the fix:**
 
-- Request duration from telemetry: median ~3.0 s, p90 ~6.3 s, max ~9.1 s. Template analytics
-  answers took about 2.4 to 4.0 s; document answers 3.8 to 9.1 s; Indonesian document answers
-  (with a translation step) 8.7 to 9.1 s; guardrail rejections took a few milliseconds.
-- LLM cost from telemetry: about $0.0076 for the whole run (all LLM calls priced, 0 failures).
+- **A5, a value dropped from the answer.** "How many fraudulent transactions are there in total?"
+  ran correct SQL but answered "Analysis processed 1 rows and 1 columns." Any analytics result that
+  was not a time series or a ranking got a shape-only summary. It now states the values
+  ("Result, total fraudulent transactions: 7,506.").
+- **Indonesian prompt injection was not detected.** All six patterns were English. Indonesian
+  equivalents were added, with benign Indonesian questions (including one that only a word boundary
+  protects) that must not be flagged.
+- **A rejected input could cost an LLM call.** Language detection ran before the rejection checks
+  and fell back to the LLM for text its keywords did not recognise. A rejection now uses an
+  LLM-free language guess; the authoritative detection runs only for accepted queries.
+- **A failed intent classifier looked like a decision.** See the 0.40 fallback above.
+
+**Measured effect (run 2, before, vs run 4, after):** the Indonesian injection (X2) went from three
+LLM calls and about 2.0 s (rejected late, by the LLM classifier) to zero calls and under 5 ms
+(rejected by the guardrails). Total LLM calls over the 21 cases went from 30 to 27.
+
+**Measurements (run 4; client machine to the cloud services):**
+
+- Request duration from telemetry: median about 3.0 s, max about 9.3 s. Template analytics answers
+  took about 2.4 to 4.0 s; document answers 3.8 to 9.3 s; Indonesian document answers (with a
+  translation step) 8.7 to 9.3 s; guardrail rejections a few milliseconds.
+- LLM cost from telemetry: about $0.0075 for the whole run (27 priced LLM calls, 0 failures).
   Template analytics answers made no LLM call; each document answer cost about $0.001.
-- Route decided by: keyword rules 15, LLM classifier 3, guardrails 3 (of 21 requests).
+- Route decided by: keyword rules 15, LLM classifier 2, guardrails 4 (of 21 requests).
 
-**Not measured:** embedding cost (the telemetry events carry only LLM cost); anything about
-answer quality beyond the checks above; latency from other locations; any repeat-run variance
-beyond two runs that made identical routing decisions.
+**Not fixed, by design or scope:**
+
+- **A compound question gets one path.** C1 records this; there is no hybrid workflow.
+- **Embedding cost is not in the telemetry.** Only LLM calls are priced. Pricing embeddings would
+  change the cost semantics in `docs/observability-contract.md`, so it needs its own decision.
+
+**Not measured:** answer quality beyond the checks above; latency from other locations; variance
+beyond four runs on one day (runs 1 to 4 made the same routing decisions except where a fix changed them).
 
 ---
 
@@ -143,4 +169,4 @@ An earlier version of this document said behavioral regressions block deployment
 - **Answer completeness and correctness**: only required-term presence is checked.
 - **Refusal usefulness** and narrative quality: not automated, not reviewed systematically.
 - **Retrieval quality**: not evaluated independently of the final answer.
-- **Variance across runs and models**: two runs only.
+- **Variance across runs and models**: four runs on one day.

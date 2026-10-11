@@ -148,7 +148,7 @@ Only events the code actually emits are listed.
 | `request.started` | `api/routers.py` | `route` |
 | `guardrails.completed` / `guardrails.blocked` | `api/routers.py` (decision from `validate_query`) | `blocked`, `reason` (`too_short\|noise\|injection\|out_of_domain\|null`), `query_length`, `query_hash` |
 | `language_detection.completed` / `.failed` | `src/orchestrator.py` via `observe_step` | none (`observe_step` carries no metadata by design) |
-| `intent.completed` / `intent.failed` | `src/orchestrator.py` | completed: `intent`, `confidence` (`null` when decided by the LLM), `method` (`heuristic\|llm`), `route`. failed: `error_type` |
+| `intent.completed` / `intent.failed` | `src/orchestrator.py` | completed: `intent`, `confidence` (`null` when decided by the LLM), `method` (`heuristic\|llm`), `route`. A `heuristic` decision with `confidence` below 0.80 means the LLM classifier gave no usable label and the heuristic's weak guess was used. failed: `error_type` |
 | `retrieval.completed` | `src/rag/retriever_direct.py` | `retrieval_method` (`vector_rpc`), `candidate_count`, `source_filter`. A successful retrieval with zero candidates is still `completed` with `candidate_count=0`. |
 | `retrieval.skipped` | same | `retrieval_method`, `reason` (`retriever_disabled\|no_embedding`), `candidate_count=0`, `selected_count=0`, `source_filter` |
 | `retrieval.failed` | same | `retrieval_method`, `error_type`, `source_filter` |
