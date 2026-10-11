@@ -224,3 +224,56 @@ def test_a_wrong_language_generic_answer_still_fails():
     english = copy.deepcopy(ANALYTICS)
     english["result"]["analytics"]["answer"] = "Result, total fraudulent transactions: 7,506."
     assert not run(id_case, english).language_ok
+
+
+# ---- the hybrid response shape ---------------------------------------------
+
+HYBRID = {
+    "query": "q", "intent": "hybrid", "error": None,
+    "result": {
+        "type": "hybrid",
+        "answer": "fraud_A has the highest fraud incidence with 49 cases.\n\nWhat the documents say: card-not-present exposure raises fraud risk.",
+        "analytics": {"answer": "x", "sql": "SELECT 1", "data_points": [{"m": 1}]},
+        "rag": {"answer": "y", "citations": [{"source": "Bhatla", "page": 5, "preview": "p"}], "retrieval_status": "ok"},
+        "parts": {"analytics": "ok", "rag": "ok"},
+    },
+}
+CASE_HYBRID = {"id": "C1", "expected_route": "hybrid", "expected_behavior": "answer", "must_include": ["fraud"],
+               "language": "en", "expect_sql": True, "expect_citations": True}
+
+
+def test_a_complete_hybrid_response_passes_and_carries_both_kinds_of_evidence():
+    o = observe(HYBRID)
+    assert (o.route, o.behavior, o.has_sql, o.citations) == ("hybrid", ANSWER, True, 1)
+    assert run(CASE_HYBRID, HYBRID).passed
+
+
+def test_a_hybrid_answer_built_from_one_failed_half_is_degraded_not_an_answer():
+    for failed, half in (("analytics", "analytics"), ("rag", "rag")):
+        body = copy.deepcopy(HYBRID)
+        body["result"]["parts"][failed] = "failed"
+        body["result"][half] = None
+        o = observe(body)
+        assert o.behavior == DEGRADED
+        assert not run(CASE_HYBRID, body).passed
+
+
+def test_a_hybrid_answer_missing_its_sql_or_its_citations_fails_grounding():
+    no_sql = copy.deepcopy(HYBRID)
+    no_sql["result"]["analytics"]["sql"] = None
+    _wrong(CASE_HYBRID, no_sql, grounding_ok=False)
+    no_cites = copy.deepcopy(HYBRID)
+    no_cites["result"]["rag"]["citations"] = []
+    _wrong(CASE_HYBRID, no_cites, grounding_ok=False)
+
+
+def test_a_single_path_answer_to_a_compound_question_fails_on_route():
+    _wrong(CASE_HYBRID, ANALYTICS, route_ok=False)
+
+
+def test_a_failed_hybrid_pipeline_is_an_error():
+    body = {"query": "q", "intent": "hybrid", "result": None, "error": "Hybrid pipeline failed."}
+    assert observe(body).behavior == ERROR
+    empty = copy.deepcopy(HYBRID)
+    empty["result"]["answer"] = " "
+    assert observe(empty).behavior == ERROR

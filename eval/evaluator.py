@@ -9,6 +9,7 @@ POST /query really returns:
   analytics  {"intent": "analytics", "result": {"type": "analytics", "analytics": {"answer", "sql", ...}}}
   rag        {"intent": "rag",       "result": {"type": "rag", "answer", "citations", "retrieval_status", ...}}
   rejection  {"intent": "reject",    "result": {"type": "reject", "message"}}
+  hybrid     {"intent": "hybrid",    "result": {"type": "hybrid", "answer", "analytics": {...}, "rag": {...}, "parts"}}
 
 Nothing here decides a route. It only reads the route the API reported.
 """
@@ -23,7 +24,7 @@ DEGRADED = "degraded"
 ERROR = "error"
 RATE_LIMITED = "rate_limited"
 
-_ROUTES = {"analytics", "rag", "reject"}
+_ROUTES = {"analytics", "rag", "reject", "hybrid"}
 
 _ID_WORDS = frozenset(
     "yang dan adalah untuk dengan dalam ini itu pada dari atau tidak dapat oleh sebagai karena akan juga "
@@ -107,6 +108,25 @@ def observe(body: Any, status_code: int = 200) -> Observed:
             answer=answer,
             has_sql=bool(str(analytics.get("sql") or "").strip()),
             note="" if answer.strip() else "analytics returned no answer",
+        )
+
+    if route == "hybrid":
+        analytics = result.get("analytics") if isinstance(result.get("analytics"), dict) else None
+        rag = result.get("rag") if isinstance(result.get("rag"), dict) else None
+        parts = result.get("parts") if isinstance(result.get("parts"), dict) else {}
+        answer = str(result.get("answer") or "")
+        citations = (rag or {}).get("citations")
+        note = f"parts={parts}"
+        if not answer.strip() or (analytics is None and rag is None):
+            return Observed(route, ERROR, note=note)
+        both_ok = parts.get("analytics") == "ok" and parts.get("rag") == "ok"
+        return Observed(
+            route,
+            ANSWER if both_ok else DEGRADED,   # an answer built from one failed half is not a full answer
+            answer=answer,
+            has_sql=bool(str((analytics or {}).get("sql") or "").strip()),
+            citations=len(citations) if isinstance(citations, list) else 0,
+            note="" if both_ok else note,
         )
 
     answer = str(result.get("answer") or "")
