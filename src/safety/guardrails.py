@@ -51,6 +51,12 @@ FORBIDDEN_PATTERNS = [
     r"simulate\s+.*assistant",
     r"bypass\s+.*security",
     r"act\s+as\s+.*system",
+    # Indonesian equivalents. \b keeps "mengabaikan transaksi ..." (to ignore transactions) from matching.
+    r"\babaikan\s+(?:semua\s+)?(?:instruksi|perintah|aturan)\s+(?:sebelumnya|di\s+atas)",
+    r"\blupakan\s+(?:semua\s+)?(?:instruksi|perintah|aturan)",
+    r"\blupakan\s+.*system\s+prompt",
+    r"\b(?:tampilkan|ungkapkan|bocorkan|tunjukkan)\s+.*system\s+prompt",
+    r"\b(?:lewati|terobos)\s+.*keamanan",
 ]
 
 # Domain allowlist (English + Indonesian)
