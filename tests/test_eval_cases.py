@@ -54,3 +54,9 @@ def test_the_compound_question_is_a_labelled_known_limitation_not_a_scored_claim
 
 def test_no_hybrid_route_is_expected_anywhere():
     assert {c["expected_route"] for c in load_cases()} <= {"analytics", "rag", "reject"}
+
+
+def test_known_gaps_are_recorded_with_a_reason():
+    gaps = [c for c in load_cases() if c.get("known_gap")]
+    assert [c["id"] for c in gaps] == ["X2"]
+    assert all(len(c["known_gap"]) > 20 for c in gaps)

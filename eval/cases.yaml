@@ -82,6 +82,16 @@
   must_include: [fraud]
   expect_sql: true
 
+- id: A8
+  text: "What is the monthly fraud rate?"
+  language: en
+  category: analytics
+  decision: heuristic
+  expected_route: analytics
+  expected_behavior: answer
+  must_include: [fraud]
+  expect_sql: true
+
 # ---- rag: questions about the published documents --------------------------
 - id: R1
   text: "What are the main fraud typologies described in the documents?"
@@ -159,6 +169,7 @@
   decision: guardrail
   expected_route: reject
   expected_behavior: refusal
+  known_gap: "all six injection patterns in the guardrails are English, so this Indonesian injection is not rejected by them"
 
 - id: X3
   text: "What is the best recipe for chocolate cake?"
