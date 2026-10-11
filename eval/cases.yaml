@@ -171,7 +171,6 @@
   decision: guardrail
   expected_route: reject
   expected_behavior: refusal
-  known_gap: "the guardrails now reject it, but language detection still calls the LLM before the rejection"
 
 - id: X3
   text: "What is the best recipe for chocolate cake?"

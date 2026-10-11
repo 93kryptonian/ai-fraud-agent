@@ -56,7 +56,8 @@ def test_no_hybrid_route_is_expected_anywhere():
     assert {c["expected_route"] for c in load_cases()} <= {"analytics", "rag", "reject"}
 
 
-def test_known_gaps_are_recorded_with_a_reason():
-    gaps = [c for c in load_cases() if c.get("known_gap")]
-    assert [c["id"] for c in gaps] == ["X2"]
-    assert all(len(c["known_gap"]) > 20 for c in gaps)
+def test_any_recorded_known_gap_carries_a_reason():
+    # The mechanism stays (a strict expected failure in the offline gate); with no open gap the list is empty.
+    for c in load_cases():
+        if "known_gap" in c:
+            assert len(c["known_gap"]) > 20, c["id"]

@@ -24,16 +24,11 @@ from src.llm.llm_client import llm
 # LANGUAGE DETECTION
 # =============================================================================
 
-def detect_language(text: str) -> str:
+def detect_language_heuristic(text: str):
     """
-    Detect query language.
+    Keyword-only language guess. Never calls the LLM.
 
-    Strategy:
-    1. Cheap keyword heuristic
-    2. LLM fallback only if ambiguous
-
-    Returns:
-        "id" or "en"
+    Returns "id", "en", or None when no keyword matches.
     """
     t = text.strip().lower()
 
@@ -51,6 +46,24 @@ def detect_language(text: str) -> str:
     )
     if any(k in t for k in eng_keywords):
         return "en"
+
+    return None
+
+
+def detect_language(text: str) -> str:
+    """
+    Detect query language.
+
+    Strategy:
+    1. Cheap keyword heuristic
+    2. LLM fallback only if ambiguous
+
+    Returns:
+        "id" or "en"
+    """
+    guess = detect_language_heuristic(text)
+    if guess:
+        return guess
 
     # Fallback: LLM detection
     lang = llm.run(

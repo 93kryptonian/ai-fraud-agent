@@ -22,7 +22,7 @@ import re
 from typing import Literal, Optional, Tuple
 
 from src.utils.logger import get_logger
-from src.rag.question_rewrite import detect_language
+from src.rag.question_rewrite import detect_language, detect_language_heuristic
 
 logger = get_logger(__name__)
 
@@ -182,6 +182,17 @@ def is_domain_related(query: str) -> bool:
 
     return False
 
+_INDONESIAN_HINTS = re.compile(
+    r"\b(abaikan|lupakan|tampilkan|ungkapkan|bocorkan|tunjukkan|lewati|terobos|"
+    r"instruksi|perintah|aturan|keamanan|sebelumnya|tentang|jelaskan|untuk|dari|dan)\b"
+)
+
+
+def _guess_message_language(text: str) -> str:
+    """No-LLM language guess used only to word a rejection when the keyword rules found nothing."""
+    return "id" if _INDONESIAN_HINTS.search(text.lower()) else "en"
+
+
 # =============================================================================
 # MAIN ENTRYPOINT
 # =============================================================================
@@ -201,16 +212,11 @@ def validate_query(
     intentionally independent of the human-facing message: callers building
     telemetry must use `reason`, never infer one by parsing the message.
     """
-    # Unlike orchestrator.py's own detect_language() call, this one had no
-    # surrounding try/except before P1 (src/llm/llm_client.py). It relied on
-    # llm.run() never raising — LLM failures used to silently produce a
-    # sentinel string that happened to resolve to "en" here. Now that
-    # llm.run() raises on exhausted retries (P1), this preserves that exact
-    # prior fallback behavior explicitly instead of by accident.
-    try:
-        lang = detect_language(text)
-    except Exception:
-        lang = "en"
+    # A rejected input must not cost an LLM call. Wording a rejection needs only
+    # a cheap, LLM-free language guess; the authoritative detection (which falls
+    # back to the LLM for text the keyword rules do not recognise) runs once, at
+    # the end, for a query that was accepted.
+    lang = detect_language_heuristic(text) or _guess_message_language(text)
 
     # -------------------------------------------------
     # 1. Empty / meaningless input
@@ -257,5 +263,13 @@ def validate_query(
     # -------------------------------------------------
     cleaned = clean_whitespace(text)
     cleaned = trim_overlong(cleaned)
+
+    # Unlike orchestrator.py's own detect_language() call, this one has no
+    # surrounding try/except upstream. llm.run() raises on exhausted retries
+    # (P1), so keep the prior fallback to "en" explicitly instead of by accident.
+    try:
+        lang = detect_language(text)
+    except Exception:
+        lang = "en"
 
     return True, cleaned, lang, None
