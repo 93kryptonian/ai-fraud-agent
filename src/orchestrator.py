@@ -130,6 +130,10 @@ def detect_intent_heuristic(query: str) -> Tuple[str, float]:
     return "rag", 0.40
 
 
+class IntentClassificationError(Exception):
+    """The LLM classifier produced no usable label (call failed, bad JSON, or unknown intent)."""
+
+
 def detect_intent_llm(query: str) -> Tuple[str, str]:
     """
     LLM-based intent & language classification.
@@ -137,29 +141,33 @@ def detect_intent_llm(query: str) -> Tuple[str, str]:
     Returns:
         intent: "rag" | "analytics" | "reject"
         lang: "en" | "id"
+
+    Raises IntentClassificationError when there is no usable label. The caller
+    must not mistake that for a decision: a failed classifier used to be
+    indistinguishable from a real "rag" answer.
     """
     resp = None
     try:
         prompt = INTENT_CLASSIFICATION_PROMPT.format(q=query)
         resp = llm.run(prompt, temperature=0.0, purpose="intent_classification")
         data = json.loads(llm._extract_json_block(str(resp)))
-        intent = data.get("intent", "rag")
+        intent = data.get("intent")
         lang = data.get("language", "en")
     except Exception as e:
         logger.error(
             f"[intent_llm] Failed to classify: {e} | resp={resp!r}"
         )
-        intent, lang = "rag", "en"
+        raise IntentClassificationError(type(e).__name__) from e
 
     # Never trust unvalidated LLM labels for routing
     if intent not in {"rag", "analytics", "reject"}:
-        intent = "rag"
+        logger.error(f"[intent_llm] Unusable label {intent!r} | resp={resp!r}")
+        raise IntentClassificationError("unknown_label")
     if lang not in {"en", "id"}:
         lang = "en"
 
     logger.info(f"[intent_llm] intent={intent} lang={lang}")
     return intent, lang
-
 
 def detect_intent(
     query: str, detected_lang: str
@@ -188,7 +196,15 @@ def detect_intent(
     if conf >= 0.80:
         return intent_h, detected_lang, conf, "heuristic"
 
-    intent_l, lang_l = detect_intent_llm(query)
+    try:
+        intent_l, lang_l = detect_intent_llm(query)
+    except IntentClassificationError:
+        # The classifier gave no usable label, so the LLM did not decide: the
+        # route is the heuristic's weak guess. Say so (method="heuristic" with
+        # its low confidence, which a real heuristic decision never has: those
+        # are >= 0.80) instead of reporting a decision the LLM never made.
+        logger.warning("[intent] LLM classifier unusable; keeping the heuristic guess")
+        return intent_h, detected_lang, conf, "heuristic"
     return intent_l, lang_l or detected_lang, None, "llm"
 
 # =============================================================================

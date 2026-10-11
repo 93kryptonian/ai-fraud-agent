@@ -115,17 +115,18 @@ def test_a_weak_guess_is_handed_to_the_llm_and_the_llm_wins(monkeypatch):
     assert (intent, method) == ("analytics", "llm") and len(calls) == 1
 
 
-def test_an_llm_failure_on_an_ambiguous_question_silently_becomes_rag(llm_calls):
-    """Documented hazard: classifier failure is indistinguishable from a real RAG decision."""
-    intent, _lang, _conf, method = detect_intent("Show me fraud by merchant.", "en")
+def test_an_llm_failure_is_reported_as_the_weak_heuristic_guess_not_as_an_llm_decision(llm_calls):
+    """A failed classifier used to report method="llm": indistinguishable from a real RAG decision."""
+    intent, _lang, confidence, method = detect_intent("Show me fraud by merchant.", "en")
     assert llm_calls == ["intent_classification"]
-    assert (intent, method) == ("rag", "llm")
+    assert (intent, method, confidence) == ("rag", "heuristic", 0.40)
 
 
-def test_an_unknown_llm_label_is_coerced_to_rag_never_trusted(monkeypatch):
-    llm_says(monkeypatch, "hybrid")
-    intent, *_ = detect_intent("Show me fraud by merchant.", "en")
-    assert intent == "rag"
+@pytest.mark.parametrize("reply", ['{"intent": "hybrid", "language": "en"}', "not json at all", '{"language": "en"}'])
+def test_an_unusable_llm_label_is_never_trusted_and_is_reported_as_a_failure(monkeypatch, reply):
+    monkeypatch.setattr(llm_client.llm, "run", lambda prompt, **kw: reply)
+    intent, _lang, confidence, method = detect_intent("Show me fraud by merchant.", "en")
+    assert (intent, method, confidence) == ("rag", "heuristic", 0.40)
 
 
 def test_an_llm_rejection_is_honored(monkeypatch):
