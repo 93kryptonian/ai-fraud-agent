@@ -29,11 +29,11 @@ _ID_WORDS = frozenset(
     "yang dan adalah untuk dengan dalam ini itu pada dari atau tidak dapat oleh sebagai karena akan juga "
     "terjadi penipuan kartu transaksi merupakan melalui terhadap memiliki kasus insiden tertinggi terendah "
     "jumlah sebuah lebih antara setelah ketika bahwa jika saat yaitu serta hanya sekitar telah sudah bisa "
-    "mereka kami anda pedagang bank".split()
+    "mereka kami anda pedagang bank hasil analisis mengembalikan baris pertama".split()
 )
 _EN_WORDS = frozenset(
     "the and of to is are in for that with this by on as from or not can be it an which has have was were "
-    "their than more most highest lowest total rate cases".split()
+    "their than more most highest lowest total rate cases result returned rows row first".split()
 )
 
 

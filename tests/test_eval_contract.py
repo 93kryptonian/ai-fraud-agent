@@ -209,3 +209,18 @@ def test_alternatives_accept_a_translated_term_but_still_require_one_of_them():
     unrelated = copy.deepcopy(RAG_ID)
     unrelated["result"]["answer"] = "Penipuan adalah tindakan yang dilakukan untuk mendapatkan keuntungan dengan cara curang."
     assert not run(case, unrelated).include_ok
+
+
+def test_the_systems_own_generic_answer_templates_are_judged_in_the_right_language():
+    # real output of summarize_generic (found when A5's answer, now correct, read as "unknown")
+    assert answer_language("Result, total fraudulent transactions: 7,506.") == "en"
+    assert answer_language("The query returned 2 rows. First row: channel: online; n: 10.") == "en"
+    assert answer_language("Hasil analisis, jumlah fraud: 7,506.") == "id"
+    assert answer_language("Query mengembalikan 2 baris. Baris pertama: channel: online; n: 10.") == "id"
+
+
+def test_a_wrong_language_generic_answer_still_fails():
+    id_case = {"id": "A6", "expected_route": "analytics", "expected_behavior": "answer", "language": "id"}
+    english = copy.deepcopy(ANALYTICS)
+    english["result"]["analytics"]["answer"] = "Result, total fraudulent transactions: 7,506."
+    assert not run(id_case, english).language_ok
