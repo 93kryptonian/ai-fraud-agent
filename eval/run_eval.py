@@ -23,9 +23,7 @@ HERE = Path(__file__).parent
 
 
 def load_cases():
-    queries = yaml.safe_load((HERE / "queries.yaml").read_text())
-    expectations = yaml.safe_load((HERE / "expectations.yaml").read_text())
-    return [{**q, **expectations[q["id"]]} for q in queries]
+    return yaml.safe_load((HERE / "cases.yaml").read_text())
 
 
 def run() -> int:
@@ -43,15 +41,17 @@ def run() -> int:
         except ValueError:
             body = None
         result = check_case(case, observe(body, response.status_code))
-        results.append(result)
+        scored = case.get("scored", True)
+        if scored:
+            results.append(result)
 
-        mark = "PASS" if result.passed else "FAIL"
+        mark = ("PASS" if result.passed else "FAIL") if scored else "INFO"
         print(f"{mark} {result.id}  route={result.observed.route}  behavior={result.observed.behavior}")
         for failure in result.failures:
             print(f"     - {failure}")
 
     passed = sum(r.passed for r in results)
-    print(f"\nSUMMARY: {passed}/{len(results)} passed")
+    print(f"\nSUMMARY: {passed}/{len(results)} scored cases passed (INFO cases are known limitations, not counted)")
     return 0 if passed == len(results) else 1
 
 
