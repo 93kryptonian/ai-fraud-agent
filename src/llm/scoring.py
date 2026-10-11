@@ -20,6 +20,7 @@ from statistics import mean
 
 import numpy as np
 
+from src.llm.refusal import is_refusal
 from src.monitoring.phoenix_client import run_phoenix_llm_judge
 from src.embeddings.embedder import embedding_model
 
@@ -77,7 +78,7 @@ def heuristic_score(question: str, answer: str, chunks: List[Dict]) -> float:
     - lexical overlap
     - information density
     """
-    if not answer or "not provide enough information" in answer.lower():
+    if not answer or is_refusal(answer):
         return 0.0
 
     total_ctx_len = sum(len(c["content"]) for c in chunks)

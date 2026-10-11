@@ -13,6 +13,7 @@ Purpose:
 from typing import Optional
 
 from src.llm.llm_client import llm
+from src.llm.refusal import is_refusal
 
 
 def generate_insight(
@@ -31,7 +32,7 @@ def generate_insight(
     if not answer:
         return None
 
-    if "not provide enough information" in answer.lower():
+    if is_refusal(answer):
         return None
 
     language_instruction = (
