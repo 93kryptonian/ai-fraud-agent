@@ -26,11 +26,14 @@ RATE_LIMITED = "rate_limited"
 _ROUTES = {"analytics", "rag", "reject"}
 
 _ID_WORDS = frozenset(
-    "yang dan adalah untuk dengan dalam ini itu pada dari atau tidak dapat oleh sebagai "
-    "karena akan juga terjadi penipuan kartu transaksi merupakan melalui terhadap".split()
+    "yang dan adalah untuk dengan dalam ini itu pada dari atau tidak dapat oleh sebagai karena akan juga "
+    "terjadi penipuan kartu transaksi merupakan melalui terhadap memiliki kasus insiden tertinggi terendah "
+    "jumlah sebuah lebih antara setelah ketika bahwa jika saat yaitu serta hanya sekitar telah sudah bisa "
+    "mereka kami anda pedagang bank".split()
 )
 _EN_WORDS = frozenset(
-    "the and of to is are in for that with this by on as from or not can be it an which".split()
+    "the and of to is are in for that with this by on as from or not can be it an which has have was were "
+    "their than more most highest lowest total rate cases".split()
 )
 
 
@@ -134,10 +137,13 @@ def check_case(case: dict, observed: Observed) -> CaseResult:
         failures.append(f"behavior: expected {case['expected_behavior']!r}, got {observed.behavior!r}{why}")
 
     include_ok = True
-    for keyword in case.get("must_include") or []:
-        if observed.behavior != ANSWER or keyword.lower() not in observed.answer.lower():
+    for requirement in case.get("must_include") or []:
+        # a string is one required term; a list is alternatives, any one of which satisfies it
+        # (an answer in another language may translate the term)
+        options = [requirement] if isinstance(requirement, str) else list(requirement)
+        if observed.behavior != ANSWER or not any(o.lower() in observed.answer.lower() for o in options):
             include_ok = False
-            failures.append(f"must_include: {keyword!r} not in the answer")
+            failures.append(f"must_include: none of {options!r} in the answer")
 
     language_ok = True
     if case.get("language") and case["expected_behavior"] == ANSWER:

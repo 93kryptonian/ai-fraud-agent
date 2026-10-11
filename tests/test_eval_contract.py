@@ -166,3 +166,46 @@ def test_every_case_has_valid_expectations():
         assert c["language"] in {"en", "id"}, c["id"]
         if c["expected_route"] == "reject":
             assert c["expected_behavior"] == "refusal", c["id"]
+
+
+# ---- fixes made after the first live run (answers read, see eval report) ---
+
+def test_a_short_correct_indonesian_analytics_answer_is_judged_indonesian():
+    # the real answer to A6/A7; the first judge found one Indonesian word in it and said "unknown"
+    assert answer_language("fraud_Rau and Sons memiliki insiden fraud tertinggi dengan 49 kasus (fraud rate ~1.97%).") == "id"
+
+
+def test_a_short_correct_english_analytics_answer_is_judged_english():
+    assert answer_language("fraud_Rau and Sons has the highest fraud incidence with 49 cases (fraud rate ~1.97%).") == "en"
+
+
+def test_the_wider_judge_still_rejects_the_wrong_language():
+    id_case = {"id": "A6", "expected_route": "analytics", "expected_behavior": "answer", "language": "id"}
+    english = copy.deepcopy(ANALYTICS)
+    english["result"]["analytics"]["answer"] = "fraud_Rau and Sons has the highest fraud incidence with 49 cases."
+    assert not run(id_case, english).language_ok
+    en_case = dict(id_case, language="en")
+    indonesian = copy.deepcopy(ANALYTICS)
+    indonesian["result"]["analytics"]["answer"] = "fraud_Rau and Sons memiliki insiden fraud tertinggi dengan 49 kasus."
+    assert not run(en_case, indonesian).language_ok
+
+
+def test_a_contentless_aggregate_answer_is_not_treated_as_a_good_answer():
+    # the real answer to A5 ("how many fraudulent transactions?"): no number, no mention of fraud
+    case = {"id": "A5", "expected_route": "analytics", "expected_behavior": "answer",
+            "must_include": ["fraud"], "language": "en", "expect_sql": True}
+    body = copy.deepcopy(ANALYTICS)
+    body["result"]["analytics"]["answer"] = "Analysis processed 1 rows and 1 columns."
+    result = run(case, body)
+    assert not result.include_ok and not result.passed
+
+
+def test_alternatives_accept_a_translated_term_but_still_require_one_of_them():
+    case = {"id": "R2", "expected_route": "rag", "expected_behavior": "answer", "language": "id",
+            "must_include": [["card-not-present", "tidak hadir"]], "expect_citations": True}
+    translated = copy.deepcopy(RAG_ID)
+    translated["result"]["answer"] = "Penipuan kartu yang tidak hadir adalah penipuan yang terjadi tanpa kartu fisik dan dengan data kartu."
+    assert run(case, translated).passed
+    unrelated = copy.deepcopy(RAG_ID)
+    unrelated["result"]["answer"] = "Penipuan adalah tindakan yang dilakukan untuk mendapatkan keuntungan dengan cara curang."
+    assert not run(case, unrelated).include_ok
