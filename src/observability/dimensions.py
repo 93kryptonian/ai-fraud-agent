@@ -73,9 +73,13 @@ ERROR_TYPES: FrozenSet[str] = frozenset({
 
 def allowed_models() -> FrozenSet[str]:
     """Models that may be a label value: priced models plus configured ones."""
+    from src.embeddings.embedder import EMBEDDING_MODEL, EMBEDDING_PRICES_PER_1M
     from src.llm.llm_client import DEFAULT_MODEL, FALLBACK_MODEL, PRICES_PER_1M
 
-    return frozenset(PRICES_PER_1M) | {DEFAULT_MODEL, FALLBACK_MODEL}
+    return (
+        frozenset(PRICES_PER_1M) | {DEFAULT_MODEL, FALLBACK_MODEL}
+        | frozenset(EMBEDDING_PRICES_PER_1M) | {EMBEDDING_MODEL}
+    )
 
 
 _ERROR_DOMAIN = "error_types"
@@ -179,6 +183,12 @@ _event("llm.failed", _FAILURE, purpose=_D(_PURPOSES), model=_D(_MODEL_DOMAIN),
 _event("llm.fallback", _SUCCESS, purpose=_D(_PURPOSES), from_model=_D(_MODEL_DOMAIN),
        to_model=_D(_MODEL_DOMAIN), reason=_D(_FALLBACK_REASONS),
        cumulative_session_cost_usd=_M)
+
+# Embedding calls (query embedding for retrieval). A failed call degrades to a
+# dummy vector, so it is reported here instead of failing the request.
+_event("embedding.completed", _SUCCESS, model=_D(_MODEL_DOMAIN), total_tokens=_M,
+       estimated_cost_usd=_M)
+_event("embedding.failed", _FAILURE, model=_D(_MODEL_DOMAIN), error_type=_D(_ERROR_DOMAIN))
 
 _event("analytics.sql.completed", _SUCCESS, intent=_D(_ANALYTICS_INTENTS),
        used_fallback_sql=_D(_BOOL), primary_error_type=_D(_ERROR_DOMAIN), row_count=_M)

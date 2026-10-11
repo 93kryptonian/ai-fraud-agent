@@ -206,6 +206,32 @@ def _drive_llm(monkeypatch):
     c.run("hi", purpose="rag_answer")
 
 
+def _drive_embeddings(monkeypatch):
+    import src.embeddings.embedder as e
+
+    def client(create):
+        return SimpleNamespace(embeddings=SimpleNamespace(create=create))
+
+    def ok(**kwargs):
+        return SimpleNamespace(
+            data=[SimpleNamespace(embedding=[0.1, 0.2])],
+            usage=SimpleNamespace(total_tokens=12, prompt_tokens=12),
+        )
+
+    def boom(**kwargs):
+        raise ConnectionError("x")
+
+    monkeypatch.setattr(e, "EMBEDDINGS_ENABLED", True)
+
+    # embedding.completed (priced)
+    monkeypatch.setattr(e, "_get_openai_client", lambda: client(ok))
+    e.embed_texts(["hello"])
+
+    # embedding.failed (degrades to a dummy vector)
+    monkeypatch.setattr(e, "_get_openai_client", lambda: client(boom))
+    e.embed_texts(["hello"])
+
+
 def _drive_analytics(monkeypatch):
     import src.analytics.fraud_analytics as fa
 
@@ -251,7 +277,7 @@ def _drive_analytics(monkeypatch):
 def all_events(event_records, monkeypatch):
     for driver in (
         _drive_router, _drive_orchestrator, _drive_retrieval,
-        _drive_llm, _drive_analytics,
+        _drive_llm, _drive_embeddings, _drive_analytics,
     ):
         driver(monkeypatch)
     return _events(event_records)

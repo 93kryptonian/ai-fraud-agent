@@ -101,6 +101,16 @@ METRICS: Tuple[MetricSpec, ...] = (
                value="estimated_cost_usd"),
     MetricSpec("llm_cost_unknown_total", COUNTER, ("llm.completed",), ("purpose", "model"),
                when=lambda e: "estimated_cost_usd" in _md(e) and _md(e)["estimated_cost_usd"] is None),
+    # --- embeddings (priced like LLM calls; unknown is never 0) -----------
+    MetricSpec("embedding_calls_total", COUNTER, ("embedding.completed", "embedding.failed"),
+               ("model", "status")),
+    MetricSpec("embedding_failures_total", COUNTER, ("embedding.failed",), ("error_type",)),
+    MetricSpec("embedding_tokens_total", SUM, ("embedding.completed",), ("model",),
+               value="total_tokens"),
+    MetricSpec("embedding_cost_usd_total", SUM, ("embedding.completed",), ("model",),
+               value="estimated_cost_usd"),
+    MetricSpec("embedding_cost_unknown_total", COUNTER, ("embedding.completed",), ("model",),
+               when=lambda e: "estimated_cost_usd" in _md(e) and _md(e)["estimated_cost_usd"] is None),
     # --- retrieval / ranking ---------------------------------------------
     MetricSpec("retrieval_total", COUNTER,
                ("retrieval.completed", "retrieval.failed", "retrieval.skipped"),

@@ -158,6 +158,7 @@ Only events the code actually emits are listed.
 | `llm.completed` | `src/llm/llm_client.py::LLMClient.run` | `purpose`, `model`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `estimated_cost_usd`, `retry_count`. Token and cost fields are `null` when the provider returned no usage. One terminal event per `run()` call, covering the whole retry loop. |
 | `llm.failed` | same | `purpose`, `model`, `retry_count`, `error_type`. Emitted once when retries are exhausted; `run()` then raises `LLMExhaustedRetriesError`. |
 | `llm.fallback` | same | `purpose`, `from_model`, `to_model`, `reason` (`budget_threshold`, the only implemented reason), `cumulative_session_cost_usd` |
+| `embedding.completed` / `embedding.failed` | `src/embeddings/embedder.py` | completed: `model`, `total_tokens`, `estimated_cost_usd` (`null` when the model is unpriced or usage is missing). failed: `model`, `error_type`. A failed call degrades to a dummy vector; it is reported here, not as a request failure. |
 | `analytics.sql.completed` | `src/analytics/fraud_analytics.py` | `intent`, `used_fallback_sql`, `primary_error_type`, `row_count` |
 | `analytics.sql.failed` | same | `intent`, `used_fallback_sql`, `primary_error_type`, `error_type` |
 | `analytics.completed` | same | success: `intent`, `confidence`, `chart_generated`. failure: `error_type`. An honest "insufficient data" answer is `success`; only an unexpected internal failure is `failure`. |
@@ -288,7 +289,14 @@ outcome (success, blocked, error) of every route. A blocked request can
 carry cost: guardrails may call the LLM for language detection before it
 blocks.
 
-Cost is derived from **responses received**, never from attempts:
+Cost is derived from **responses received**, never from attempts. Both LLM
+responses and embedding responses count (embedding responses are priced from
+their input tokens; before 2026-10-11 only LLM responses were counted, so
+request cost then excluded embeddings). One query embedding costs about
+$0.0000003, below the 6-decimal resolution of `cost_usd_total`: embedding cost is
+recorded per call (`estimated_cost_usd`, 9 decimals) and in
+`embedding_cost_usd_total`, and only shows in a request total once it adds up
+to at least a microdollar:
 
 | Observation | Effect |
 |---|---|
@@ -308,8 +316,8 @@ cost_status:
   unknown          only unpriced responses -> null
 ```
 
-`complete` means every LLM response received by the request had an
-attributable, known price. Calls that fail before a response containing
+`complete` means every LLM and embedding response received by the request had
+an attributable, known price. Calls that fail before a response containing
 usage is received do not affect cost completeness; their reliability is
 reported by `llm.failed`, not by cost. A request whose only LLM calls all
 failed is therefore `not_applicable`, not `complete`.
@@ -459,6 +467,13 @@ Rules:
 | `analytics.sql.failed` | `primary_error_type` | dimension | known exception classes, else `other` |
 | `analytics.sql.failed` | `status` | dimension | `failure`; else `other` |
 | `analytics.sql.failed` | `used_fallback_sql` | dimension | `false`, `true`; else `other` |
+| `embedding.completed` | `estimated_cost_usd` | measure |  |
+| `embedding.completed` | `model` | dimension | priced or configured models, else `other` |
+| `embedding.completed` | `status` | dimension | `success`; else `other` |
+| `embedding.completed` | `total_tokens` | measure |  |
+| `embedding.failed` | `error_type` | dimension | known exception classes, else `other` |
+| `embedding.failed` | `model` | dimension | priced or configured models, else `other` |
+| `embedding.failed` | `status` | dimension | `failure`; else `other` |
 | `guardrails.blocked` | `blocked` | dimension | `false`, `true`; else `other` |
 | `guardrails.blocked` | `query_hash` | correlation |  |
 | `guardrails.blocked` | `query_length` | measure |  |
@@ -536,6 +551,8 @@ Rules:
 | `analytics.completed` | 1242 |
 | `analytics.sql.completed` | 414 |
 | `analytics.sql.failed` | 414 |
+| `embedding.completed` | 5 |
+| `embedding.failed` | 115 |
 | `guardrails.blocked` | 18 |
 | `guardrails.completed` | 18 |
 | `intent.completed` | 48 |
@@ -736,6 +753,11 @@ Rules:
 | `llm_prompt_tokens_total`, `llm_completion_tokens_total` | sum | `purpose`, `model` |
 | `llm_cost_usd_total` | sum (non-null costs) | `purpose`, `model` |
 | `llm_cost_unknown_total` | counter (null cost) | `purpose`, `model` |
+| `embedding_calls_total` | counter | `model`, `status` |
+| `embedding_failures_total` | counter | `error_type` |
+| `embedding_tokens_total` | sum | `model` |
+| `embedding_cost_usd_total` | sum (non-null costs) | `model` |
+| `embedding_cost_unknown_total` | counter (null cost) | `model` |
 | `retrieval_total` | counter | `status`, `retrieval_method`, `reason` (skipped only) |
 | `retrieval_empty_total` | counter (completed, `candidate_count` = 0) | `retrieval_method` |
 | `retrieval_failures_total` | counter | `error_type` |

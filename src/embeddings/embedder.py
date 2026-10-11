@@ -14,6 +14,9 @@ import os
 import threading
 from typing import List, Optional
 
+from src.observability.cost import add_request_cost, add_unpriced_response
+from src.observability.events import emit_event
+from src.observability.timing import elapsed_timer
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -36,6 +39,24 @@ DUMMY_VECTOR_DIM = EMBEDDING_DIM
 # vector rather than failing the request), so the worst case is roughly
 # 3 x EMBEDDING_TIMEOUT_SECONDS plus the SDK's short backoff.
 EMBEDDING_TIMEOUT_SECONDS = float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "10"))
+
+# USD per 1M input tokens. Exact model-name match only; a model with no entry
+# is UNPRICED (cost unknown, never $0.00), the same rule as the LLM price table.
+# Verify against the provider's pricing page whenever this table changes.
+EMBEDDING_PRICES_PER_1M = {
+    "text-embedding-3-small": 0.02,
+}
+
+
+def estimate_embedding_cost(model: str, tokens: Optional[int]) -> Optional[float]:
+    """USD for one embedding response, or None when the model is unpriced or usage is missing."""
+    price = EMBEDDING_PRICES_PER_1M.get(model)
+    if price is None or tokens is None:
+        return None
+    # 9 decimals, not 6: one query embedding is ~15 tokens (~$0.0000003), which
+    # a 6-decimal round would turn into $0.00 and hide the whole cost.
+    return round(tokens / 1_000_000 * price, 9)
+
 
 # =============================================================================
 # LAZY OPENAI CLIENT
@@ -69,6 +90,42 @@ def _get_openai_client():
             _openai_client = OpenAI(api_key=api_key, timeout=EMBEDDING_TIMEOUT_SECONDS)
         return _openai_client
 
+def _record_embedding_response(response, duration_ms) -> None:
+    """
+    Telemetry and request cost for one embedding response. Never raises: an
+    observability failure must not turn a successful embedding into a dummy vector.
+    """
+    try:
+        usage = getattr(response, "usage", None)
+        tokens = getattr(usage, "total_tokens", None) if usage is not None else None
+        if tokens is None and usage is not None:
+            tokens = getattr(usage, "prompt_tokens", None)
+        cost = estimate_embedding_cost(EMBEDDING_MODEL, tokens)
+
+        if cost is None:
+            add_unpriced_response()      # usage missing or model unpriced: unknown, never $0
+        else:
+            add_request_cost(cost)
+
+        emit_event(
+            "embedding.completed", step="embedding", status="success",
+            duration_ms=duration_ms,
+            metadata={"model": EMBEDDING_MODEL, "total_tokens": tokens, "estimated_cost_usd": cost},
+        )
+    except Exception:
+        logger.warning("[embedder] Failed to record embedding telemetry", exc_info=True)
+
+
+def _record_embedding_failure(error: Exception) -> None:
+    try:
+        emit_event(
+            "embedding.failed", step="embedding", status="failure",
+            metadata={"model": EMBEDDING_MODEL, "error_type": type(error).__name__},
+        )
+    except Exception:
+        logger.warning("[embedder] Failed to record embedding failure", exc_info=True)
+
+
 # =============================================================================
 # PUBLIC API
 # =============================================================================
@@ -95,20 +152,24 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
     client = _get_openai_client()
 
     try:
-        response = client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=texts,
-            dimensions=EMBEDDING_DIM,
-        )
+        with elapsed_timer() as elapsed:
+            response = client.embeddings.create(
+                model=EMBEDDING_MODEL,
+                input=texts,
+                dimensions=EMBEDDING_DIM,
+            )
+            duration_ms = elapsed()
 
         embeddings = [item.embedding for item in response.data]
 
-        logger.info(f"[embedder] Generated {len(embeddings)} embeddings")
-        return embeddings
-
     except Exception as e:
         logger.error(f"[embedder] Embedding generation failed: {e}")
+        _record_embedding_failure(e)
         return [[0.0] * DUMMY_VECTOR_DIM for _ in texts]
+
+    _record_embedding_response(response, duration_ms)
+    logger.info(f"[embedder] Generated {len(embeddings)} embeddings")
+    return embeddings
 
 
 def embed_text(text: str) -> Optional[List[float]]:
