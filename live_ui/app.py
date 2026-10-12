@@ -141,6 +141,13 @@ def render_outcome(outcome: client.Outcome) -> None:
         st.warning(f"The API is limiting requests right now. {wait}")
         return
 
+    if kind == client.UNAVAILABLE:
+        st.warning(
+            "The API is not available right now. It may be waking up or restarting, which on a "
+            "free tier can take up to a minute. Wait a moment, then ask again."
+        )
+        return
+
     if kind == client.TIMEOUT:
         st.error(f"{outcome.message} The API may still be waking up. Ask again in a moment.")
         return

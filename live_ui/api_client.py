@@ -26,6 +26,7 @@ RAG = "rag"
 HYBRID = "hybrid"
 REJECTED = "rejected"
 RATE_LIMITED = "rate_limited"
+UNAVAILABLE = "unavailable"
 TIMEOUT = "timeout"
 UNREACHABLE = "unreachable"
 API_ERROR = "api_error"
@@ -160,8 +161,18 @@ def ask(
                 retry = int(response.json().get("retry_after_seconds"))
             except Exception:
                 retry = None
+        if retry is None:
+            # The API's own limiter always sends Retry-After and a JSON body. A 429 with neither
+            # came from the platform in front of it (a service that is down, waking or overloaded),
+            # so calling it a rate limit would tell the visitor the wrong thing to do.
+            return Outcome(UNAVAILABLE, elapsed(), status_code=status,
+                           message="The API is not responding normally.")
         return Outcome(RATE_LIMITED, elapsed(), retry_after_seconds=retry, status_code=status,
                        message="The API is rate limiting requests.")
+
+    if status in (502, 503, 504):
+        # Bad gateway, unavailable, gateway timeout: the proxy could not reach the API.
+        return Outcome(UNAVAILABLE, elapsed(), status_code=status, message="The API is not responding normally.")
 
     if status >= 500:
         return Outcome(API_ERROR, elapsed(), status_code=status, message="The API failed while answering.")

@@ -73,6 +73,29 @@ def test_rate_limit_reads_retry_after_header_then_body():
     assert out.retry_after_seconds == 12
 
 
+def test_a_429_without_the_limiters_fingerprint_is_the_platform_not_a_rate_limit():
+    # the API's own limiter always sends Retry-After and a JSON body; anything else came from in front of it
+    for response in (
+        lambda r: httpx.Response(429, text="<html>Too Many Requests</html>"),
+        lambda r: httpx.Response(429, json={"error": "slow down"}),
+        lambda r: httpx.Response(429, text=""),
+    ):
+        out = _ask(response)
+        assert out.kind == api_client.UNAVAILABLE and out.retry_after_seconds is None
+
+
+def test_a_proxy_that_cannot_reach_the_api_is_unavailable_but_a_500_is_an_api_error():
+    for status in (502, 503, 504):
+        assert _ask(_json(status, {"detail": "x"})).kind == api_client.UNAVAILABLE
+    assert _ask(_json(500, {"detail": "x"})).kind == api_client.API_ERROR
+    assert _ask(_json(501, {"detail": "x"})).kind == api_client.API_ERROR
+
+
+def test_the_real_limiter_response_is_still_a_rate_limit():
+    out = _ask(_json(429, {"error": "Rate limit exceeded. Please slow down.", "retry_after_seconds": 48}, {"Retry-After": "48"}))
+    assert (out.kind, out.retry_after_seconds) == (api_client.RATE_LIMITED, 48)
+
+
 def test_server_error_and_bad_request_and_garbage_are_classified():
     assert _ask(_json(500, {"detail": "boom"})).kind == api_client.API_ERROR
     assert _ask(_json(400, {"error": "no"})).kind == api_client.REJECTED
@@ -177,6 +200,13 @@ def test_page_renders_the_sql_for_an_analytics_answer(monkeypatch):
     at = _run_page(monkeypatch, out)
     assert any(c.value == "SELECT 1" for c in at.code)
     assert any("A leads with \\$5." in m.value for m in at.markdown)
+
+
+def test_page_tells_an_unavailable_api_apart_from_a_rate_limit(monkeypatch):
+    out = api_client.Outcome(api_client.UNAVAILABLE, 0.2, message="m")
+    shown = " ".join(w.value for w in _run_page(monkeypatch, out).warning)
+    assert "not available right now" in shown and "waking up or restarting" in shown
+    assert "limiting requests" not in shown
 
 
 @pytest.mark.parametrize("kind,expected", [

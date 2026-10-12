@@ -6,7 +6,7 @@ for analytics answers, the cited passages for document answers.
 
 - One setting: `API_URL` (defaults to the live API). No provider or database credentials.
 - Imports nothing from the API's packages; `tests/test_live_ui.py` enforces this.
-- Errors are explained on the page: rate limit, timeout, unreachable API, API error, guardrail rejection.
+- Errors are explained on the page: rate limit (only when the 429 carries the API limiter's `Retry-After`), API not available (a 429 without it, or a 502/503/504: usually a free-tier service waking up), timeout, unreachable API, API error, guardrail rejection.
 
 Run locally:
 
