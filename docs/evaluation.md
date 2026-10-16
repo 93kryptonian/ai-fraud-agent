@@ -69,8 +69,13 @@ For every case, from the response `POST /query` really returns:
 **Offline routing gate (CI).** Calls the production `detect_intent` and `validate_query`
 themselves, with the LLM replaced by a recorder that fails any test that reaches it. It proves:
 the keyword rules and guardrails route each labelled case as `cases.yaml` says, and cases
-labelled as needing the LLM really defer to it. Seven deliberate regressions injected into the
-routing code (a dropped keyword, a changed threshold, a weakened guard) each made it fail.
+labelled as needing the LLM really defer to it.
+
+Its strength was tested by injecting seven deliberate regressions into the routing code (a dropped
+keyword, a changed threshold, a weakened guard, and others). The initial suite caught six. The
+seventh, dropping the `monthly` keyword, exposed a gap in the cases: the one case that contained
+it also matched another keyword. A case that only that keyword could satisfy was added, and the
+expanded suite caught all seven.
 
 It does **not** prove that the real LLM classifies ambiguous questions correctly, that retrieval
 finds anything, or that any answer is right.
