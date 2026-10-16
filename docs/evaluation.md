@@ -112,9 +112,11 @@ made after reading the actual answers.
 | 5 | hybrid route and embedding cost added | 22 | 21 / 22 (one case passed that should not have: see below) |
 | 6 | all fixes | 24 | 23 / 24 |
 
-**What the failures were.** Run 1 had five: four were defects in the evaluator itself (a language
-judge too small to recognise two correct Indonesian answers, two expectations that hard-coded a
-surface form) and one was a real system defect (A5). Run 5 is the instructive one: its Indonesian
+**What the failures were.** Run 1 had five failed cases: four were caused by the evaluator itself,
+from three distinct defects (a language judge too small to recognise two correct Indonesian answers,
+and two expectations that hard-coded a surface form), and one was a real system defect (A5). A
+fourth evaluator defect surfaced after A5 was fixed: the judge did not know the system's new
+generic answer templates (run 3). Run 5 is the instructive one: its Indonesian
 compound case passed, but its document half was an apology ("dokumen yang tersedia tidak memberikan
 cukup informasi"), which the system scored 0.415 and the evaluator accepted. The refusal check knew
 only the English sentence. Fixing it made that case honestly `degraded`.
@@ -168,11 +170,13 @@ beyond six runs on one day.
 
 ## 6. Deployment gating: what is and is not enforced
 
-- CI (GitHub Actions) runs the offline routing gate on every push and pull request.
-- The repository does **not** make that result block a deploy. Render deploys from GitHub on
-  its own, and the repository's deploy workflow does nothing (its Render credentials resolve to
-  empty values). Whether a failing CI run blocks a Render deploy depends on a Render setting
-  (Auto-Deploy "After CI Checks Pass"), which is not controlled or verified from this repository.
+- CI (GitHub Actions) runs the offline routing gate on pushes to `main`, `dev` and `feature/**`, and
+  on pull requests. A branch with any other name (for example `fix/...`) gets no CI run.
+- The repository does **not** make that result block a deploy. Render is connected to
+  GitHub and builds new commits itself, and the repository's deploy workflow does nothing (its
+  Render credentials resolve to empty values), so nothing in the repository makes a deploy wait
+  for CI. Whether a failing CI run blocks a Render deploy depends on a Render setting (Auto-Deploy
+  "After CI Checks Pass"), which is not controlled or verified from this repository.
 - The live evaluation is not run automatically and gates nothing.
 
 An earlier version of this document said behavioral regressions block deployment. That was not true.
