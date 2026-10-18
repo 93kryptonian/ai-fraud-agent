@@ -23,6 +23,8 @@ flowchart LR
     Intent -->|RAG| RAG[RAG Agent]
     Intent -->|Analytics| Analytics[Analytics Agent]
     Intent -->|Reject| Reject[Reject Response]
+    Intent -->|Hybrid: numbers and an explanation| Analytics
+    Intent -->|Hybrid: numbers and an explanation| RAG
 
     %% =========================
     %% RAG Path
@@ -39,10 +41,12 @@ flowchart LR
     SQL --> AnalyticsSummary[Analytics Summary]
 
     %% =========================
+    %% Scoring runs on the RAG path (and the RAG half of hybrid) only.
+    %% Analytics carries its own confidence and the executed SQL.
     %% Scoring & Validation
     %% =========================
-    Insight --> Scoring[Answer Scoring<br/>(heuristic + embedding + numeric + optional LLM)]
-    AnalyticsSummary --> Scoring
+    Insight --> Scoring[Answer Scoring - RAG path only<br/>(heuristic + embedding + numeric; LLM judge off)]
+    AnalyticsSummary --> Response
 
     %% =========================
     %% Final Output
