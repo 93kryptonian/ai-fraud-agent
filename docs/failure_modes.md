@@ -356,3 +356,20 @@ Found by running the evaluation set ([evaluation.md](evaluation.md)). All are fi
 - The corpus (Bhatla, EBA/ECB report) has nothing on merchant-category patterns, so the documents cannot explain them: those compound questions are correctly answered as `degraded` (numbers with SQL, and an honest "not enough information" for the explanation).
 
 **Embedding cost.** One query embedding is about 7 to 17 tokens, about $0.0000002 to $0.0000003. Over the 24 evaluation cases (11 embedding calls, 120 tokens) it was about $0.0000024, about 0.025% of the LLM spend (a fortieth of one percent). It is below the 6-decimal resolution of a request's `cost_usd_total`, so it is recorded per call (9 decimals) and in `embedding_cost_usd_total`.
+
+---
+
+## 11. Contract boundary probe (2026-10-18)
+
+Ten boundary questions run once against the live code with a real LLM, to see which clauses of
+[system_contract.md](system_contract.md) are enforced and by what. One machine, one day: a probe,
+not a benchmark. The result is the enforcement ledger in section 9 of the contract. Recorded, not fixed.
+
+| Finding | Effect |
+|---|---|
+| Crypto fraud, insurance fraud, general programming, legal advice and accusing a named merchant are refused only by the LLM classifier | Refusal costs 1 to 3 LLM calls and is not a deterministic guarantee: the guardrail domain allowlist lets any input containing "fraud" through |
+| Languages other than English and Indonesian are not rejected | A French question was processed with 5 LLM calls and answered in English with "not enough information" |
+| A two-part question is routed as one | "What is card-not-present fraud? Also, which merchants have the highest fraud incidence?" answered only the second half, silently |
+| "Predict future fraud" is a stated non-goal but nothing enforces it | "Will card fraud rise next year?" was routed to analytics and ended in "Insufficient data" by accident |
+| AML is routed to RAG, not rejected | The documents do not cover it, so RAG refuses after 5 LLM calls: consistent with "unless covered by the documents", but costly |
+
